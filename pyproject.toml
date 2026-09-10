@@ -1,0 +1,36 @@
+[project]
+name = "haeindex"
+version = "0.1.0"
+description = "PDF → 검색 → 답변. 문서를 여러 개 넣어 보면서 만든다."
+requires-python = ">=3.13"
+# 의존성은 **그 단계에 도달할 때** 추가한다. 지금은 PDF 를 읽는 것뿐이다.
+dependencies = [
+    "typer>=0.15",
+    "pydantic>=2.10",
+    "pdfplumber>=0.11",
+    "httpx>=0.28.1",
+    "opensearch-py>=3.2.0",
+    "pyyaml>=6.0.3",
+]
+
+[project.scripts]
+haeindex = "haeindex.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+# 한국어 주석에 × ⏎ — 등이 정당하게 쓰인다
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.6",
+]
