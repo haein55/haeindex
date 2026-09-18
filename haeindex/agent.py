@@ -9,8 +9,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from haeindex.answer import Answer, Refusal
 from haeindex.answer import answer as run_answer
+from haeindex.bedrock import Bedrock, Truncated
 from haeindex.index import INDEX
-from haeindex.ollama import Ollama, Truncated
 from haeindex.search import Hit, Result
 from haeindex.search import search as run_search
 
@@ -119,7 +119,7 @@ def merge_hits(existing: Sequence[Hit], fresh: Sequence[Hit]) -> list[Hit]:
 
 def run(
     os_client: OpenSearch,
-    ol: Ollama,
+    ol: Bedrock,
     question: str,
     *,
     doc_counts: Mapping[str, int],

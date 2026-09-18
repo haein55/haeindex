@@ -5,10 +5,10 @@ description = "PDF → 검색 → 답변. 문서를 여러 개 넣어 보면서 
 requires-python = ">=3.13"
 # 의존성은 **그 단계에 도달할 때** 추가한다. 지금은 PDF 를 읽는 것뿐이다.
 dependencies = [
+    "boto3>=1.40.0",
     "typer>=0.15",
     "pydantic>=2.10",
     "pdfplumber>=0.11",
-    "httpx>=0.28.1",
     "opensearch-py>=3.2.0",
     "pyyaml>=6.0.3",
 ]

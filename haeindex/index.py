@@ -4,18 +4,18 @@ from typing import Any
 from opensearchpy import OpenSearch
 from opensearchpy.helpers import bulk
 
+from haeindex.bedrock import EMBED_DIM
 from haeindex.chunks import Chunk
-from haeindex.ollama import EMBED_DIM
+from haeindex.enrich import Enrichment
 
-INDEX = "haeindex_v1"
+INDEX = "haeindex_bedrock_v1"
 OS_HOST = "http://localhost:9200"
+SOURCE_EXCLUDE = ["embedding", "context_embedding"]
 
 KO_STOPTAGS = [
     "E",
     "IC",
     "J",
-    "MAG",
-    "MAJ",
     "MM",
     "SP",
     "SSC",
@@ -77,6 +77,11 @@ def mappings(dim: int = EMBED_DIM) -> dict[str, Any]:
             "body": {"type": "text", "index": False},
             "text": _text_field(),
             "queries": _text_field(),
+            "summary": _text_field(),
+            "keywords": _text_field(),
+            "entities": _text_field(),
+            "content_type": {"type": "keyword"},
+            "language": {"type": "keyword"},
             "char_len": {"type": "integer"},
             "token_len": {"type": "integer"},
             "embedding": {
@@ -127,6 +132,7 @@ def index_chunks(
     embeddings: Sequence[Sequence[float]],
     name: str = INDEX,
     queries: Sequence[Sequence[str]] | None = None,
+    enrichments: Sequence[Enrichment | None] | None = None,
 ) -> tuple[int, list]:
     def actions() -> Iterator[dict[str, Any]]:
         for i, (c, vec) in enumerate(zip(chunks, embeddings, strict=True)):
@@ -135,11 +141,54 @@ def index_chunks(
                 source["embedding"] = list(vec)
             if queries and queries[i]:
                 source["queries"] = "\n".join(queries[i])
+            if enrichments and enrichments[i]:
+                source.update(enrichments[i].model_dump())
             yield {"_index": name, "_id": c.chunk_id, "_source": source}
 
     ok, errors = bulk(os_client, actions(), chunk_size=50, raise_on_error=False)
     os_client.indices.refresh(index=name)
     return (int(ok), list(errors))
+
+
+def find_covering(
+    os_client: OpenSearch,
+    doc_id: str,
+    *,
+    sections: Sequence[str] = (),
+    pages: Sequence[int] = (),
+    name: str = INDEX,
+    size: int = 50,
+) -> list[dict[str, Any]]:
+    """정답 라벨을 덮는 청크를 찾는다. 채점(covered_targets)과 같은 술어를 쓴다."""
+    if sections:
+        should: list[dict[str, Any]] = [{"terms": {"section_ids": list(sections)}}]
+    else:
+        should = [
+            {
+                "bool": {
+                    "filter": [
+                        {"range": {"page": {"lte": p}}},
+                        {"range": {"end_page": {"gte": p}}},
+                    ]
+                }
+            }
+            for p in pages
+        ]
+    if not should:
+        return []
+    body = {
+        "size": size,
+        "_source": {"excludes": SOURCE_EXCLUDE},
+        "query": {
+            "bool": {
+                "filter": [{"term": {"doc_id": doc_id}}],
+                "should": should,
+                "minimum_should_match": 1,
+            }
+        },
+        "sort": [{"seq": "asc"}],
+    }
+    return [h["_source"] for h in os_client.search(index=name, body=body)["hits"]["hits"]]
 
 
 def doc_counts(os_client: OpenSearch, name: str = INDEX) -> dict[str, int]:

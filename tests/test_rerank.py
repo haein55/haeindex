@@ -88,9 +88,7 @@ def rows_for(n_query=12):
     for i in range(n_query):
         rows.append(Row(doc_id="d1", query=f"q{i}", label=1, feats=[1.0] * 10))
         for k in range(4):
-            rows.append(
-                Row(doc_id="d1", query=f"q{i}", label=0, feats=[0.1 * (k + 1)] * 10)
-            )
+            rows.append(Row(doc_id="d1", query=f"q{i}", label=0, feats=[0.1 * (k + 1)] * 10))
     return rows
 
 

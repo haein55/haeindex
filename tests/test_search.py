@@ -34,8 +34,8 @@ def test_knn_은_pre_filter_다() -> None:
 
 
 def test_벡터는_source_로_안_돌려받는다() -> None:
-    assert bm25_body("q", [], 5)["_source"]["excludes"] == ["embedding"]
-    assert knn_body([0.1], [], 5)["_source"]["excludes"] == ["embedding"]
+    assert bm25_body("q", [], 5)["_source"]["excludes"] == ["embedding", "context_embedding"]
+    assert knn_body([0.1], [], 5)["_source"]["excludes"] == ["embedding", "context_embedding"]
 
 
 def test_rrf_는_점수가_아니라_순위를_쓴다() -> None:
@@ -72,7 +72,7 @@ def test_근접_중복을_버린다() -> None:
     ]
     kept, dropped = dedupe(hits)
     assert [h.chunk_id for h in kept] == ["a", "c"]
-    assert dropped == 1
+    assert dropped == ["b"]
 
 
 def test_본문이_비면_중복으로_안_본다() -> None:
@@ -82,7 +82,7 @@ def test_본문이_비면_중복으로_안_본다() -> None:
     ]
     kept, dropped = dedupe(hits)
     assert len(kept) == 2
-    assert dropped == 0
+    assert dropped == []
 
 
 def test_ngram_은_공백을_무시한다() -> None:
@@ -93,3 +93,11 @@ def test_가상_질문은_검색_필드에서_빠져_있다() -> None:
     body = bm25_body("질의", [], 50)
     fields = body["query"]["bool"]["should"][0]["multi_match"]["fields"]
     assert not any(f.startswith("queries^") for f in fields)
+
+
+def test_검증된_LLM_메타데이터는_낮은_가중치로_검색한다() -> None:
+    body = bm25_body("질의", [], 50)
+    fields = body["query"]["bool"]["should"][0]["multi_match"]["fields"]
+    assert "summary^0.8" in fields
+    assert "keywords^1.2" in fields
+    assert "entities^2.0" in fields

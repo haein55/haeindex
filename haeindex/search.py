@@ -4,8 +4,8 @@ from typing import Any
 from opensearchpy import OpenSearch
 from pydantic import BaseModel, ConfigDict, Field
 
-from haeindex.index import INDEX
-from haeindex.ollama import Ollama
+from haeindex.bedrock import Bedrock
+from haeindex.index import INDEX, SOURCE_EXCLUDE
 
 TOP_K = 5
 CANDIDATE_K = 50
@@ -17,8 +17,10 @@ BOOSTS = {
     "text": 1.0,
     "title_phrase": 4.0,
     "text_phrase": 2.0,
+    "summary": 0.8,
+    "keywords": 1.2,
+    "entities": 2.0,
 }
-SOURCE_EXCLUDE = ["embedding"]
 
 
 class LegHit(BaseModel):
@@ -43,8 +45,12 @@ class Result(BaseModel):
     query: str
     hits: list[Hit] = Field(default_factory=list)
     candidates: dict[str, int] = Field(default_factory=dict)
-    dropped: int = 0
+    dropped_ids: list[str] = Field(default_factory=list)
     degraded: list[str] = Field(default_factory=list)
+
+    @property
+    def dropped(self) -> int:
+        return len(self.dropped_ids)
 
     def top_score(self, leg: str) -> float:
         return self.hits[0].legs[leg].score if self.hits and leg in self.hits[0].legs else 0.0
@@ -54,7 +60,13 @@ def doc_filter(doc_ids: Sequence[str]) -> list[dict[str, Any]]:
     return [{"terms": {"doc_id": list(doc_ids)}}] if doc_ids else []
 
 
-def bm25_body(query: str, filters: Sequence[dict[str, Any]], size: int) -> dict[str, Any]:
+def bm25_body(
+    query: str,
+    filters: Sequence[dict[str, Any]],
+    size: int,
+    *,
+    contextual: bool = False,
+) -> dict[str, Any]:
     b = BOOSTS
     return {
         "size": size,
@@ -71,6 +83,10 @@ def bm25_body(query: str, filters: Sequence[dict[str, Any]], size: int) -> dict[
                                 f"title^{b['title']}",
                                 f"path^{b['path']}",
                                 f"text^{b['text']}",
+                                f"summary^{b['summary']}",
+                                f"keywords^{b['keywords']}",
+                                f"entities^{b['entities']}",
+                                *(["contextual_text^0.7"] if contextual else []),
                             ],
                         }
                     },
@@ -94,7 +110,11 @@ def bm25_body(query: str, filters: Sequence[dict[str, Any]], size: int) -> dict[
 
 
 def knn_body(
-    vector: Sequence[float], filters: Sequence[dict[str, Any]], size: int
+    vector: Sequence[float],
+    filters: Sequence[dict[str, Any]],
+    size: int,
+    *,
+    field: str = "embedding",
 ) -> dict[str, Any]:
     knn: dict[str, Any] = {"vector": list(vector), "k": size}
     if filters:
@@ -102,7 +122,7 @@ def knn_body(
     return {
         "size": size,
         "_source": {"excludes": SOURCE_EXCLUDE},
-        "query": {"knn": {"embedding": knn}},
+        "query": {"knn": {field: knn}},
     }
 
 
@@ -111,14 +131,15 @@ def char_ngrams(text: str, n: int = 3) -> set[str]:
     return {t[i : i + n] for i in range(max(0, len(t) - n + 1))}
 
 
-def dedupe(hits: Sequence[Hit], jaccard: float = DEDUPE_JACCARD) -> tuple[list[Hit], int]:
+def dedupe(hits: Sequence[Hit], jaccard: float = DEDUPE_JACCARD) -> tuple[list[Hit], list[str]]:
+    """버린 것의 id 를 돌려준다 — 개수만 세면 '정답이 dedupe 로 사라졌다' 를 못 본다."""
     kept: list[Hit] = []
     grams: list[set[str]] = []
-    dropped = 0
+    dropped: list[str] = []
     for h in hits:
         g = char_ngrams(h.source.get("body", ""))
         if any(g and k and len(g & k) / len(g | k) >= jaccard for k in grams):
-            dropped += 1
+            dropped.append(h.chunk_id)
             continue
         kept.append(h)
         grams.append(g)
@@ -147,15 +168,18 @@ def search(
     os_client: OpenSearch,
     query: str,
     *,
-    embedder: Ollama | None = None,
+    embedder: Bedrock | None = None,
     doc_ids: Sequence[str] = (),
     top_k: int = TOP_K,
     candidate_k: int = CANDIDATE_K,
     index: str = INDEX,
     extra_queries: Sequence[str] = (),
+    contextual: bool = False,
 ) -> Result:
     filters = doc_filter(doc_ids)
-    bodies: dict[str, dict[str, Any]] = {"bm25": bm25_body(query, filters, candidate_k)}
+    bodies: dict[str, dict[str, Any]] = {
+        "bm25": bm25_body(query, filters, candidate_k, contextual=contextual),
+    }
     degraded: list[str] = []
     for i, extra in enumerate(extra_queries):
         bodies[f"bm25+{i}"] = bm25_body(extra, filters, candidate_k)
@@ -166,6 +190,17 @@ def search(
         try:
             vecs = embedder.embed([query, *extra_queries])
             bodies["knn"] = knn_body(vecs[0], filters, candidate_k)
+            if contextual:
+                props = os_client.indices.get_mapping(index=index)[index]["mappings"].get(
+                    "properties", {}
+                )
+                if "context_embedding" in props:
+                    bodies["context-knn"] = knn_body(
+                        vecs[0],
+                        filters,
+                        candidate_k,
+                        field="context_embedding",
+                    )
             for i, vec in enumerate(vecs[1:]):
                 bodies[f"knn+{i}"] = knn_body(vec, filters, candidate_k)
         except Exception as e:
@@ -181,6 +216,6 @@ def search(
         query=query,
         hits=kept[:top_k],
         candidates={leg: len(rows) for leg, rows in results.items()},
-        dropped=dropped,
+        dropped_ids=dropped,
         degraded=degraded,
     )

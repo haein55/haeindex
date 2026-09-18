@@ -1,11 +1,13 @@
+import json
 from collections import Counter
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
+from haeindex.agent import match_doc, summarize_traces
 from haeindex.agent import run as run_agent
-from haeindex.agent import summarize_traces
 from haeindex.answer import MESSAGES, should_refuse
 from haeindex.answer import answer as run_answer
 from haeindex.blocks import build_blocks, crosses_gutter, page_blocks, size_tiers
@@ -15,9 +17,21 @@ from haeindex.chunks import (
     chunk_sections,
     report,
 )
+from haeindex.diagnose import FIXES, diagnose, tally
+from haeindex.document_cards import (
+    DOC_CANDIDATES,
+    doc_card_count,
+    ensure_doc_index,
+    generate_card,
+    index_card,
+    search_cards,
+    search_lexical_docs,
+)
+from haeindex.enrich import enrich_many
 from haeindex.evaluate import Goldset, paired_bootstrap, score_query, summarize
+from haeindex.evidence import select_evidence
 from haeindex.features import gen_many
-from haeindex.geometry import column_counts, page_gutters, stable_columns
+from haeindex.geometry import column_counts, in_band, page_gutters, stable_columns
 from haeindex.headings import (
     assign_levels,
     body_ceiling,
@@ -29,23 +43,43 @@ from haeindex.headings import (
     weight_coverage,
 )
 from haeindex.index import client, doc_counts, ensure_index, index_chunks, replace_doc
+from haeindex.listwise import DEPTH as LISTWISE_DEPTH
+from haeindex.listwise import rerank as listwise_rerank
 from haeindex.load_pdf import (
     cid_ratio,
     doubled_ratio,
+    line_bin,
     load_pages,
     page_count,
+    reading_order,
     top_fonts,
 )
-from haeindex.ollama import Ollama
+from haeindex.models import model_client
 from haeindex.paths import slugify
 from haeindex.profile import Profile, build
 from haeindex.rerank import Model as RerankModel
 from haeindex.rerank import fit, harvest, mrr_of
 from haeindex.rerank import rerank as apply_rerank
+from haeindex.routing import route_question
 from haeindex.search import CANDIDATE_K
 from haeindex.search import search as run_search
 
 app = typer.Typer(add_completion=False, no_args_is_help=True, help="PDF → 검색 → 답변")
+
+
+def _resolve_docs(os_client, patterns: list[str]) -> list[str]:
+    if not patterns:
+        return []
+    known = sorted(doc_counts(os_client))
+    out: list[str] = []
+    for pat in patterns:
+        hit = match_doc(pat, known)
+        if not hit:
+            raise typer.BadParameter(
+                f"--doc {pat!r} 가 어느 문서와도 안 맞는다.\n색인된 문서: {known}"
+            )
+        out += [d for d in hit if d not in out]
+    return out
 
 
 def _sample(n_pages: int, k: int = 8) -> list[int]:
@@ -62,8 +96,26 @@ def _fmt(counts: Counter[int]) -> str:
 def pages(
     pdf: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
     sample: Annotated[int, typer.Option("--sample")] = 8,
+    chars: Annotated[int, typer.Option("--chars", help="글자를 하나씩 몇 개 찍을까")] = 0,
+    page: Annotated[int, typer.Option("--page", help="--chars 로 볼 쪽 번호")] = 0,
 ) -> None:
     n = page_count(pdf)
+    if chars:
+        target = page or 1
+        if not 1 <= target <= n:
+            raise typer.BadParameter(f"{target}쪽은 없다 (1~{n})")
+        one = load_pages(pdf, [target])[0]
+        typer.echo(f"{pdf.name} p{target}  문자 {len(one.chars):,}개 · 읽는 순서 앞 {chars}개")
+        typer.echo(f"  {'글자':<5}{'x0':>8}{'x1':>8}{'top':>8}{'bottom':>9}{'pt':>7}  글꼴")
+        for c in reading_order(one.chars)[:chars]:
+            shown = "·" if c.text.isspace() else c.text
+            typer.echo(
+                f"  {shown:<5}{c.x0:>8.1f}{c.x1:>8.1f}{c.top:>8.1f}"
+                f"{c.bottom:>9.1f}{c.size:>7.1f}  {c.fontname}"
+            )
+        typer.echo(f"\n  줄 묶는 단위 높이 line_bin = {line_bin(one.chars):.2f}pt")
+        return
+
     docs_ = load_pages(pdf, _sample(n, sample) if sample else None)
     chars = [c for p in docs_ for c in p.chars]
     rot = sum(len(p.rotated) for p in docs_)
@@ -86,6 +138,7 @@ def columns(
     header: Annotated[float, typer.Option("--header")] = 0.0,
     footer: Annotated[float, typer.Option("--footer")] = 1.0,
     bins: Annotated[int, typer.Option("--bins")] = 160,
+    page: Annotated[int, typer.Option("--page", help="이 쪽의 히스토그램을 그린다")] = 0,
 ) -> None:
     n = page_count(pdf)
     docs_ = load_pages(pdf, _sample(n, sample))
@@ -93,6 +146,38 @@ def columns(
     typer.echo(f"{pdf.name}  (표본 {len(docs_)}쪽, bins={bins}, 밴드 {header}~{footer})")
     typer.echo(f"  페이지별      {_fmt(counts)}")
     typer.echo(f"  안정된 단 수   {stable_columns(counts)}")
+    if page:
+        _show_occupancy(pdf, page, bins=bins, header=header, footer=footer)
+
+
+def _show_occupancy(pdf: Path, page: int, *, bins: int, header: float, footer: float) -> None:
+    one = load_pages(pdf, [page])[0]
+    body = [c for c in one.chars if in_band(c, one.height, header, footer)]
+    gutters = page_gutters(
+        one.chars, one.width, one.height, header=header, footer=footer, bins=bins
+    )
+    bin_w = one.width / bins
+    hits = [0] * bins
+    for c in body:
+        for i in range(max(0, int(c.x0 / bin_w)), min(bins - 1, int(c.x1 / bin_w)) + 1):
+            hits[i] += 1
+    peak = max(hits) or 1
+
+    typer.echo(
+        f"\n  p{page} x 점유 히스토그램  (문자 {len(body):,} · 칸 {bin_w:.1f}pt · 최대 {peak})"
+    )
+    step = max(1, bins // 78)
+    bars = " ▁▂▃▄▅▆▇█"
+    line = "".join(
+        bars[min(8, int(hits[i] / peak * 8) + (1 if hits[i] else 0))] for i in range(0, bins, step)
+    )
+    typer.echo(f"    {line}")
+    typer.echo(f"    0pt{' ' * max(0, len(line) - 9)}{one.width:.0f}pt")
+    if gutters:
+        for g0, g1 in gutters:
+            typer.echo(f"    여백띠  {g0:.1f} ~ {g1:.1f}pt  (폭 {g1 - g0:.1f}pt)")
+    else:
+        typer.echo("    여백띠 없음 → 1단")
 
 
 @app.command()
@@ -259,8 +344,14 @@ def chunk(
 def index(
     pdf: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
     max_chars: Annotated[int, typer.Option("--max-chars")] = 1200,
+    accuracy: Annotated[
+        bool, typer.Option("--accuracy/--no-accuracy", help="검색 문맥·조건·절 카드 보강")
+    ] = True,
     with_queries: Annotated[
         bool, typer.Option("--with-queries", help="가상 질문 생성. 청크당 LLM 1회")
+    ] = False,
+    with_metadata: Annotated[
+        bool, typer.Option("--with-metadata", help="LLM 검색 메타데이터 생성. 청크당 1회")
     ] = False,
 ) -> None:
     prof = Profile.load(slugify(pdf))
@@ -272,15 +363,30 @@ def index(
     ensure_index(os_client)
 
     gen: list[list[str]] | None = None
+    metadata = None
+    card = None
+    card_vector = None
     failed = 0
-    with Ollama() as ol:
+    metadata_failed = 0
+    with model_client("enrich") as ol:
         vectors = ol.embed_batched([c.text for c in chs])
         if with_queries:
             with typer.progressbar(length=len(chs), label="가상 질문") as bar:
                 gen, failed = gen_many(ol, [c.body for c in chs], lambda i, n: bar.update(1))
+        if with_metadata:
+            with typer.progressbar(length=len(chs), label="검색 메타데이터") as bar:
+                metadata, metadata_failed = enrich_many(
+                    ol, [c.body for c in chs], lambda i, n: bar.update(1)
+                )
+            card = generate_card(ol, prof.doc_id, prof.source, chs)
+            if card is not None:
+                card_vector = ol.embed([card.search_text()])[0]
 
     gone = replace_doc(os_client, prof.doc_id)
-    ok, errors = index_chunks(os_client, chs, vectors, queries=gen)
+    ok, errors = index_chunks(os_client, chs, vectors, queries=gen, enrichments=metadata)
+    if with_metadata and card is not None and card_vector is not None:
+        ensure_doc_index(os_client)
+        index_card(os_client, card, card_vector)
 
     typer.echo(f"{prof.source}  방법 {how}")
     typer.echo(f"  청크 {len(chs)}개 · 임베딩 {len(vectors)}개 (dim {len(vectors[0])})")
@@ -289,7 +395,54 @@ def index(
     )
     if with_queries:
         typer.echo(f"  가상 질문 생성 실패 {failed}/{len(chs)} (빈 값으로 기록했다)")
+    if with_metadata:
+        typer.echo(
+            f"  검색 메타데이터 생성 실패 {metadata_failed}/{len(chs)} (원문 색인은 유지했다)"
+        )
+        if card is None:
+            typer.echo("  문서 카드 생성 실패 (청크 색인은 유지했다)")
+        else:
+            typer.echo(
+                f"  문서 카드 1건 색인 · 유형 {card.document_type} · "
+                f"주제 {len(card.topics)}개 · 전체 {doc_card_count(os_client)}건"
+            )
+    if accuracy and not errors:
+        from haeindex.augmentation import enhance_document
+
+        with model_client("enrich", num_ctx=16384) as enrich_llm:
+            result = enhance_document(
+                os_client, enrich_llm, enrich_llm, prof.doc_id, progress=typer.echo
+            )
+        typer.echo(
+            f"  검색 보강: {result['accepted']}/{result['total']} 청크 · "
+            f"실패 {len(result['failures'])}건"
+        )
     typer.echo(f"  인덱스 전체: {doc_counts(os_client)}")
+
+
+@app.command()
+def card(
+    pdf: Annotated[Path, typer.Argument(exists=True, dir_okay=False)],
+    max_chars: Annotated[int, typer.Option("--max-chars")] = 1200,
+) -> None:
+    """청크를 교체하지 않고 문서 카드만 생성하거나 갱신한다."""
+    prof = Profile.load(slugify(pdf))
+    _, chs, _ = _chunks_for(pdf, prof, max_chars)
+    if not chs:
+        raise typer.BadParameter("청크가 0개다")
+
+    os_client = client()
+    ensure_doc_index(os_client)
+    with model_client("enrich") as ol:
+        item = generate_card(ol, prof.doc_id, prof.source, chs)
+        if item is None:
+            raise typer.BadParameter("두 번 시도했지만 문서 카드 JSON 생성에 실패했다")
+        vector = ol.embed([item.search_text()])[0]
+    index_card(os_client, item, vector)
+    typer.echo(
+        f"{item.doc_id}  카드 색인 완료 · 유형 {item.document_type} · "
+        f"주제 {len(item.topics)}개 · 전체 {doc_card_count(os_client)}건"
+    )
 
 
 @app.command()
@@ -299,44 +452,250 @@ def search(
     top_k: Annotated[int, typer.Option("--top-k")] = 5,
     explain: Annotated[bool, typer.Option("--explain/--no-explain")] = True,
     no_embed: Annotated[bool, typer.Option("--no-embed")] = False,
+    listwise: Annotated[bool, typer.Option("--listwise", help="LLM 으로 후보를 재정렬")] = False,
+    depth: Annotated[int, typer.Option("--depth", help="재정렬할 후보 수")] = LISTWISE_DEPTH,
 ) -> None:
     os_client = client()
-    ol = None if no_embed else Ollama()
+    wanted = _resolve_docs(os_client, doc or [])
+    ol = None if no_embed else model_client("analysis")
+    ranked = None
     try:
-        res = run_search(os_client, query, embedder=ol, doc_ids=doc or [], top_k=top_k)
+        wide = CANDIDATE_K if listwise else top_k
+        res = run_search(os_client, query, embedder=ol, doc_ids=wanted, top_k=wide)
+        if listwise:
+            if ol is None:
+                raise typer.BadParameter("--listwise 는 LLM 이 필요하다. --no-embed 와 못 쓴다")
+            ranked = listwise_rerank(ol, query, res.hits, depth=depth)
+            res = res.model_copy(update={"hits": ranked.hits[:top_k]})
+        else:
+            res = res.model_copy(update={"hits": res.hits[:top_k]})
     finally:
         if ol:
             ol.close()
 
     typer.echo(f"query={query!r}  후보 {res.candidates}  dedupe -{res.dropped}")
+    if ranked:
+        typer.echo(
+            f"  재정렬 depth {depth} · LLM {ranked.calls}회 · 자리바뀜 {ranked.moved}"
+            + (f" · 파싱실패 {ranked.parse_fails}" if ranked.parse_fails else "")
+        )
     if res.degraded:
         typer.echo(f"  강등된 leg: {res.degraded}")
     for i, h in enumerate(res.hits, 1):
         s = h.source
-        legs = " ".join(f"{k}={v.rank}/{v.score:.1f}" for k, v in sorted(h.legs.items()))
+        legs = " ".join(f"{k}={v.rank}/{v.score:.3f}" for k, v in sorted(h.legs.items()))
         typer.echo(f"  {i}. [{s['doc_id'][:16]}] p{s['page']:>3} {legs}")
         typer.echo(f"     {(s.get('path') or s.get('title') or '')[:64]}")
         if explain:
             typer.echo(f"     {s.get('body', '')[:100]!r}")
 
 
+def _show_top(res, limit: int) -> None:
+    for i, h in enumerate(res.hits[:limit], 1):
+        s = h.source
+        legs = " ".join(f"{k}={v.rank}" for k, v in sorted(h.legs.items()))
+        label = (s.get("path") or s.get("title") or "")[:56]
+        typer.echo(f"    {i}. [{s['doc_id'][:14]:14}] p{s['page']:>3}  {legs:16} {label}")
+
+
+def _show_diag(d, res, limit: int) -> None:
+    typer.echo(f"{d.id}  [{d.bucket}]  {d.query!r}")
+    typer.echo(f"  정답      {d.doc_id} · {' '.join(d.targets)}")
+    typer.echo(f"  판정      {d.cause}  — {FIXES[d.cause]}")
+    typer.echo(
+        f"\n  정답을 덮는 청크 {len(d.covering)}개  (후보 {d.candidate_k} · top_k {d.top_k})"
+    )
+    for c in d.covering:
+        missing = "dedupe" if c.deduped else "후보 밖"
+        where = f"융합 {c.fused_rank:>3}" if c.fused_rank else missing
+        legs = " ".join(f"{k} {v}" for k, v in sorted(c.legs.items())) or "-"
+        typer.echo(
+            f"    {c.chunk_id.split('#')[-1]:7} p{c.page:>3}-{c.end_page:<3} "
+            f"{where:9} {legs:14} {c.label[:44]}"
+        )
+    typer.echo("\n  실제로 온 top-k")
+    _show_top(res, limit)
+
+
+@app.command()
+def why(
+    query: Annotated[str | None, typer.Argument(help="자유 질의. --id 를 쓰면 생략한다")] = None,
+    id_: Annotated[str | None, typer.Option("--id", help="골든셋 문항 id")] = None,
+    every: Annotated[bool, typer.Option("--all", help="골든셋 전체를 원인별로 집계")] = False,
+    goldset: Annotated[Path, typer.Option("--goldset", exists=True)] = Path("goldset/all.yaml"),
+    doc: Annotated[list[str] | None, typer.Option("--doc")] = None,
+    top_k: Annotated[int, typer.Option("--top-k")] = 5,
+    candidate_k: Annotated[int, typer.Option("--candidate-k")] = CANDIDATE_K,
+    limit: Annotated[int, typer.Option("--limit")] = 8,
+    baseline: Annotated[bool, typer.Option("--baseline", help="기존 검색만 진단")] = False,
+    trace_file: Annotated[Path | None, typer.Option("--trace", help="전체 실행 기록 JSON")] = None,
+) -> None:
+    """어떤 청크가 왔는지 + 정답 청크는 어디서 사라졌는지."""
+    os_client = client()
+    if not (query or id_ or every):
+        raise typer.BadParameter("질의를 주거나 --id 또는 --all 을 쓴다")
+
+    if not baseline:
+        known = sorted(doc_counts(os_client))
+        explicit = _resolve_docs(os_client, doc or [])
+        if query and not (id_ or every):
+            trace = _enhanced(os_client, query, known, explicit, top_k=max(top_k, 8))
+            _show_trace(trace, trace_file)
+            _show_top(trace.result, limit)
+            return
+        gold = Goldset.load(goldset)
+        picked = [q for q in gold.ranked if id_ is None or q.id == id_]
+        if not picked:
+            raise typer.BadParameter(f"{id_} 를 골든셋에서 못 찾았다")
+        traces = []
+        for q in picked:
+            trace = _enhanced(os_client, q.query, known, explicit, top_k=max(top_k, 8))
+            traces.append({"id": q.id, **trace.model_dump(mode="json")})
+            typer.echo(f"\n{q.id}: {q.query}")
+            _show_trace(trace)
+            _show_top(trace.result, limit)
+            d = diagnose(
+                os_client,
+                q,
+                trace.result.hits,
+                dropped_ids=trace.result.dropped_ids,
+                top_k=top_k,
+                candidate_k=candidate_k,
+            )
+            _show_diag(d, trace.result, limit)
+        if trace_file:
+            trace_file.parent.mkdir(parents=True, exist_ok=True)
+            trace_file.write_text(json.dumps(traces, ensure_ascii=False, indent=2))
+        return
+    with model_client("analysis") as ol:
+        if query and not (id_ or every):
+            wanted = _resolve_docs(os_client, doc or [])
+            res = run_search(
+                os_client, query, embedder=ol, doc_ids=wanted, top_k=limit, candidate_k=candidate_k
+            )
+            typer.echo(f"query={query!r}  후보 {res.candidates}  dedupe -{res.dropped}")
+            _show_top(res, limit)
+            return
+
+        gold = Goldset.load(goldset)
+        gold.verify(list(doc_counts(os_client)))
+        picked = [q for q in gold.ranked if id_ is None or q.id == id_]
+        if not picked:
+            raise typer.BadParameter(f"{id_} 를 골든셋에서 못 찾았다")
+
+        diags = []
+        for q in picked:
+            res = run_search(
+                os_client, q.query, embedder=ol, top_k=candidate_k, candidate_k=candidate_k
+            )
+            d = diagnose(
+                os_client,
+                q,
+                res.hits,
+                dropped_ids=res.dropped_ids,
+                top_k=top_k,
+                candidate_k=candidate_k,
+            )
+            diags.append(d)
+            if not every:
+                _show_diag(d, res, limit)
+
+    if not every:
+        return
+
+    counts = tally(diags)
+    typer.echo(f"골든셋 {goldset}  ·  순위 {len(diags)}문항  ·  후보 {candidate_k} · top_k {top_k}")
+    typer.echo(f"\n  {'원인':8}{'문항':>6}   고칠 곳")
+    typer.echo("  " + "─" * 78)
+    for cause, ids in counts.items():
+        typer.echo(f"  {cause:8}{len(ids):>6}   {FIXES[cause]}")
+    for cause, ids in counts.items():
+        if cause != "성공" and ids:
+            typer.echo(f"\n  {cause}: {', '.join(ids)}")
+
+    typer.echo("\n  버킷 × 원인")
+    buckets = sorted({d.bucket for d in diags})
+    typer.echo("  " + f"{'원인':8}" + "".join(f"{b:>7}" for b in buckets))
+    for cause in counts:
+        row = [sum(1 for d in diags if d.bucket == b and d.cause == cause) for b in buckets]
+        typer.echo(f"  {cause:8}" + "".join(f"{n:>7}" for n in row))
+
+
 @app.command()
 def ask(
     question: Annotated[str, typer.Argument()],
+    model: Annotated[
+        str | None, typer.Option("--model", help="답변 모델 이름 또는 Bedrock 모델 ID")
+    ] = None,
     doc: Annotated[list[str] | None, typer.Option("--doc")] = None,
     top_k: Annotated[int, typer.Option("--top-k")] = 5,
     min_cos: Annotated[float, typer.Option("--min-cos")] = 0.78,
     num_ctx: Annotated[int, typer.Option("--num-ctx")] = 8192,
     strict: Annotated[bool, typer.Option("--strict/--no-strict")] = True,
+    rerank: Annotated[bool, typer.Option("--rerank/--no-rerank")] = True,
+    depth: Annotated[int, typer.Option("--depth", help="LLM 재정렬 후보 수")] = LISTWISE_DEPTH,
+    auto_doc: Annotated[
+        bool, typer.Option("--auto-doc/--no-auto-doc", help="질문의 파일명을 자동 인식")
+    ] = True,
+    doc_k: Annotated[int, typer.Option("--doc-k", help="문서 카드 후보 수")] = DOC_CANDIDATES,
+    baseline: Annotated[bool, typer.Option("--baseline", help="기존 단일 패스 답변")] = False,
+    trace_file: Annotated[Path | None, typer.Option("--trace", help="전체 실행 기록 JSON")] = None,
 ) -> None:
     os_client = client()
-    with Ollama(num_ctx=num_ctx) as ol:
-        res = run_search(os_client, question, embedder=ol, doc_ids=doc or [], top_k=top_k)
+    known = sorted(doc_counts(os_client))
+    explicit = _resolve_docs(os_client, doc or [])
+    if not baseline:
+        trace = _enhanced(
+            os_client,
+            question,
+            known,
+            explicit,
+            model=model,
+            top_k=max(top_k, 8),
+            num_ctx=max(num_ctx, 16384),
+        )
+        _show_trace(trace, trace_file)
+        return
+    route = route_question(
+        question,
+        known,
+        explicit_doc_ids=explicit,
+    )
+    if not auto_doc and not explicit:
+        route = route.model_copy(update={"doc_ids": [], "reason": "자동 라우팅 꺼짐"})
+    wanted = route.doc_ids
+    with model_client("answer", model=model, num_ctx=num_ctx) as ol:
+        if auto_doc and not wanted:
+            card_hits = search_cards(os_client, question, embedder=ol, top_k=doc_k)
+            lexical_docs = search_lexical_docs(os_client, question)
+            card_docs = [h.doc_id for h in card_hits]
+            wanted = list(dict.fromkeys([*lexical_docs, *card_docs]))
+            if wanted:
+                sources = []
+                if lexical_docs:
+                    sources.append(f"청크 BM25 top-{len(lexical_docs)}")
+                if card_docs:
+                    sources.append(f"문서 카드 top-{len(card_docs)}")
+                route = route.model_copy(update={"doc_ids": wanted, "reason": " + ".join(sources)})
+        wide = max(top_k, depth) if rerank else top_k
+        res = run_search(os_client, question, embedder=ol, doc_ids=wanted, top_k=wide)
+        ranked = listwise_rerank(ol, question, res.hits, depth=depth) if rerank else None
+        if ranked:
+            res = res.model_copy(update={"hits": ranked.hits})
+        res = select_evidence(
+            res,
+            top_k=top_k,
+            allow_multiple_docs=route.allow_multiple_docs,
+        )
         ans = run_answer(ol, res, question, min_cos=min_cos, strict=strict)
 
     if ans.refusal is not None:
         typer.echo(MESSAGES[ans.refusal])
         typer.echo(f"  [코사인 top1 {res.top_score('knn'):.3f} · 임계 {min_cos}]")
+        typer.echo(
+            f"  [라우팅 {route.reason}: {', '.join(wanted) or '전체'} · "
+            f"문서혼합 {'허용' if route.allow_multiple_docs else '차단'}]"
+        )
         return
 
     typer.echo(ans.text)
@@ -348,6 +707,83 @@ def ask(
         f"\n[코사인 {res.top_score('knn'):.3f} · 컨텍스트 {len(ans.context.blocks)}블록"
         f" ~{ans.context.est_tokens}토큰]"
     )
+    typer.echo(
+        f"[모델 {ol.chat_model} · 라우팅 {route.reason}: {', '.join(wanted) or '전체'} · "
+        f"문서혼합 {'허용' if route.allow_multiple_docs else '차단'}"
+        + (f" · 언어재생성 {ans.language_retries}회" if ans.language_retries else "")
+        + (f" · 인용재생성 {ans.citation_retries}회" if ans.citation_retries else "")
+        + (" · 일부 문장 인용 불완전" if not ans.citations_complete else "")
+        + "]"
+    )
+
+
+def _enhanced(os_client, question, known, explicit, *, model=None, top_k=8, num_ctx=16384):
+    from haeindex.pipeline import run_pipeline
+
+    with ExitStack() as stack:
+        answer_llm = stack.enter_context(model_client("answer", model=model, num_ctx=num_ctx))
+        analysis = stack.enter_context(model_client("analysis", num_ctx=num_ctx))
+        vision = stack.enter_context(model_client("vision", num_ctx=num_ctx))
+        return run_pipeline(
+            os_client,
+            answer_llm,
+            analysis,
+            question,
+            known_docs=known,
+            explicit_docs=explicit,
+            top_k=top_k,
+            vision=vision,
+            progress=lambda name, detail: typer.echo(f"  [{name}] {detail}"),
+        )
+
+
+def _show_trace(trace, path=None):
+    if path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(trace.model_dump_json(indent=2), encoding="utf-8")
+    typer.echo(trace.clarification or trace.answer.text or MESSAGES.get(trace.answer.refusal, ""))
+    for block in trace.answer.context.blocks:
+        if block.n in trace.answer.cited:
+            typer.echo(f"  [{block.n}] {block.doc_id} · p.{block.page} · {block.origin}")
+    if trace.error:
+        typer.echo(f"  처리 오류: {trace.error}")
+    total = sum(stage.seconds for stage in trace.stages)
+    model_seconds = sum(event.get("seconds", 0) for event in trace.events)
+    typer.echo(
+        f"  [전체 {total:.2f}초 · 모델 {model_seconds:.2f}초 · "
+        f"LLM {trace.calls}회 · 캐시 {trace.cache_hits}회]"
+    )
+    slowest = sorted(trace.stages, key=lambda stage: stage.seconds, reverse=True)[:5]
+    if slowest:
+        summary = " · ".join(f"{s.name} {s.seconds:.2f}초" for s in slowest)
+        typer.echo(f"  [느린 단계 {summary}]")
+
+
+@app.command()
+def enhance(
+    doc: Annotated[list[str] | None, typer.Option("--doc", help="보강할 문서, 반복 가능")] = None,
+    report_file: Annotated[Path, typer.Option("--report")] = Path("work/enhance-report.json"),
+) -> None:
+    """원문·원본 벡터를 보존하고 문맥 벡터, 조건, 절 카드를 추가한다."""
+    from haeindex.augmentation import enhance_document
+
+    os_client = client()
+    wanted = _resolve_docs(os_client, doc or []) or sorted(doc_counts(os_client))
+    results = []
+    with model_client("enrich", num_ctx=16384) as llm:
+        for doc_id in wanted:
+            results.append(enhance_document(os_client, llm, llm, doc_id, progress=typer.echo))
+            report_file.parent.mkdir(parents=True, exist_ok=True)
+            report_file.write_text(json.dumps(results, ensure_ascii=False, indent=2))
+    typer.echo(f"검색 보강 {len(results)}개 문서 · 기록: {report_file}")
+
+
+@app.command()
+def serve(port: Annotated[int, typer.Option("--port", min=1, max=65535)] = 8787) -> None:
+    """HAEINDEX 웹 화면을 로컬에서 연다."""
+    from haeindex.web import serve as serve_web
+
+    serve_web(port)
 
 
 def report_pair(
@@ -383,7 +819,7 @@ def agent(
 ) -> None:
     os_client = client()
     counts = doc_counts(os_client)
-    with Ollama() as ol:
+    with model_client("answer") as ol:
         tr = run_agent(
             os_client,
             ol,
@@ -433,7 +869,7 @@ def eval_agent(
     arms: dict[str, list] = {"agent": [], "hybrid": []}
     traces = []
     refused: list[tuple] = []
-    with Ollama() as ol:
+    with model_client("answer") as ol:
         for q in gold.ranked:
             tr = run_agent(
                 os_client,
@@ -519,7 +955,7 @@ def rerank(
     typer.echo(f"학습 문서 {len(train)} · 검증 문서 {len(held)}  (문서 단위 분할)")
     for d in held:
         typer.echo(f"  검증  {d[:52]}")
-    with Ollama() as ol:
+    with model_client("analysis") as ol:
         tr = harvest(os_client, ol, doc_ids=train, per_chunk=per_chunk, lang_match=lang_match)
         va = harvest(os_client, ol, doc_ids=held, per_chunk=per_chunk, lang_match=lang_match)
 
@@ -556,6 +992,8 @@ def eval(
     min_cos: Annotated[float, typer.Option("--min-cos")] = 0.78,
     iters: Annotated[int, typer.Option("--iters")] = 10000,
     rerank_model: Annotated[Path | None, typer.Option("--rerank", exists=True)] = None,
+    listwise: Annotated[bool, typer.Option("--listwise", help="LLM 재정렬 arm 을 넣는다")] = False,
+    depth: Annotated[int, typer.Option("--depth")] = LISTWISE_DEPTH,
 ) -> None:
     gold = Goldset.load(goldset)
     os_client = client()
@@ -565,8 +1003,11 @@ def eval(
     arms: dict[str, list] = {"oracle": [], "hybrid": [], "bm25": []}
     if model:
         arms["rerank"] = []
+    if listwise:
+        arms["listwise"] = []
+    cost = {"calls": 0, "moved": 0, "parse_fails": 0}
     refused: list[tuple] = []
-    with Ollama() as ol:
+    with model_client("analysis") as ol:
         for q in gold.ranked:
             for arm, emb, docs in (
                 ("oracle", ol, [q.doc_id]),
@@ -575,10 +1016,16 @@ def eval(
             ):
                 res = run_search(os_client, q.query, embedder=emb, doc_ids=docs, top_k=top_k)
                 arms[arm].append(score_query(q, [h.source for h in res.hits], top_k))
-            if model:
+            if model or listwise:
                 wide = run_search(os_client, q.query, embedder=ol, top_k=CANDIDATE_K)
+            if model:
                 hits = apply_rerank(model, q.query, wide.hits)[:top_k]
                 arms["rerank"].append(score_query(q, [h.source for h in hits], top_k))
+            if listwise:
+                r = listwise_rerank(ol, q.query, wide.hits, depth=depth)
+                for k in cost:
+                    cost[k] += getattr(r, k)
+                arms["listwise"].append(score_query(q, [h.source for h in r.hits[:top_k]], top_k))
         for q in gold.refusal:
             res = run_search(os_client, q.query, embedder=ol, top_k=top_k)
             refused.append((q, should_refuse(res, min_cos), res.top_score("knn")))
@@ -604,6 +1051,8 @@ def eval(
     pairs = [("hybrid", "bm25"), ("oracle", "hybrid")]
     if model:
         pairs.append(("rerank", "hybrid"))
+    if listwise:
+        pairs.append(("listwise", "hybrid"))
     for base, other in pairs:
         typer.echo(f"\n  짝지은 부트스트랩 — {base} 기준 (iters={iters}, seed=0)")
         typer.echo(f"  {'지표':8}{base:>9}{other:>8}{'차이':>9}{'95% CI':>20}  유의")
@@ -618,6 +1067,14 @@ def eval(
             typer.echo(f"    통과  {cos:.3f}  {q.id}  {q.query[:34]}")
     if summaries["hybrid"].zero_hit:
         typer.echo(f"\n  hybrid 0히트: {', '.join(summaries['hybrid'].zero_hit)}")
+    if listwise:
+        n = len(gold.ranked)
+        typer.echo(
+            f"\n  재정렬 비용  depth {depth} · LLM {cost['calls']}회"
+            f" ({cost['calls'] / n:.1f}회/질의) · 자리바뀜 {cost['moved'] / n:.1f}개/질의"
+            f" · 파싱실패 {cost['parse_fails']}"
+        )
+        typer.echo(f"  listwise 0히트: {', '.join(summaries['listwise'].zero_hit) or '없음'}")
 
 
 @app.command()

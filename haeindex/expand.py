@@ -2,7 +2,7 @@ import json
 import re
 from collections.abc import Sequence
 
-from haeindex.ollama import Ollama
+from haeindex.bedrock import Bedrock
 
 MAX_REWRITES = 2
 
@@ -26,7 +26,7 @@ PROMPT = """당신은 문서 검색 시스템의 질의 재작성기입니다.
 _ARRAY = re.compile(r"\[.*?\]", re.DOTALL)
 
 
-def rewrite(llm: Ollama, query: str) -> list[str]:
+def rewrite(llm: Bedrock, query: str) -> list[str]:
     raw = llm.chat(
         [{"role": "user", "content": PROMPT.format(query=query)}], num_predict=120
     ).content
@@ -45,5 +45,5 @@ def rewrite(llm: Ollama, query: str) -> list[str]:
     return out[:MAX_REWRITES]
 
 
-def rewrite_many(llm: Ollama, queries: Sequence[str]) -> dict[str, list[str]]:
+def rewrite_many(llm: Bedrock, queries: Sequence[str]) -> dict[str, list[str]]:
     return {q: rewrite(llm, q) for q in queries}

@@ -2,7 +2,7 @@ import json
 import re
 from collections.abc import Sequence
 
-from haeindex.ollama import Ollama, Truncated
+from haeindex.bedrock import Bedrock, Truncated
 
 MAX_QUERIES = 5
 BODY_LIMIT = 1500
@@ -27,7 +27,7 @@ PROMPT = """당신은 문서 검색 시스템을 만드는 사람입니다.
 _ARRAY = re.compile(r"\[.*?\]", re.DOTALL)
 
 
-def gen_queries(llm: Ollama, body: str) -> list[str]:
+def gen_queries(llm: Bedrock, body: str) -> list[str]:
     try:
         raw = llm.chat(
             [{"role": "user", "content": PROMPT.format(body=body[:BODY_LIMIT])}],
@@ -51,7 +51,7 @@ def gen_queries(llm: Ollama, body: str) -> list[str]:
 
 
 def gen_many(
-    llm: Ollama, bodies: Sequence[str], on_step: object = None
+    llm: Bedrock, bodies: Sequence[str], on_step: object = None
 ) -> tuple[list[list[str]], int]:
     out: list[list[str]] = []
     failed = 0

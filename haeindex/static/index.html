@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#008a87">
+  <title>HAEINDEX</title>
+  <link rel="icon" href="/cat.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="desktop-caption" aria-hidden="true"><img src="/cat.svg" alt=""> 내 문서에 접속 중 . . .</div>
+  <main class="window" id="window" aria-label="HAEINDEX 대화창">
+    <header class="titlebar">
+      <div class="window-title"><img src="/cat.svg" alt=""><span>HAEINDEX <span class="title-extra">- 내 문서와 대화하기</span></span></div>
+      <div class="window-controls">
+        <button id="minimize" aria-label="창 최소화" title="최소화">▁</button>
+        <button id="maximize" aria-label="창 크기 변경" title="크게 보기">□</button>
+        <button id="close-window" aria-label="창 닫기" title="닫기 · 아래 작업표시줄에서 다시 열기">×</button>
+      </div>
+    </header>
+    <nav class="menubar" aria-label="메뉴">
+      <button id="file-menu">파일<span>(F)</span></button>
+      <button id="cat-menu" aria-haspopup="dialog">고양이<span>(C)</span> ▾</button>
+      <button id="help-menu">도움말<span>(H)</span></button>
+      <span class="version">HAEINDEX / AWS Bedrock</span>
+    </nav>
+    <div class="app-shell">
+      <div class="toolbar">
+        <div class="chat-tab"><span class="bubble-icon" aria-hidden="true">···</span> 대화</div>
+        <div class="toolbar-actions">
+          <button id="new-chat">새 대화</button>
+          <button id="save-chat">대화 저장</button>
+          <button id="toggle-docs" aria-expanded="true" aria-controls="sidebar">문서 목록</button>
+        </div>
+      </div>
+      <div class="workspace">
+        <section class="conversation" aria-label="문서 대화">
+          <div class="room-topic"><span class="topic-label">[대화상대]</span><strong id="room-title">내 문서들</strong><span class="room-online">● 온라인 친구</span></div>
+          <div class="chat-log" id="chat-log" tabindex="0" aria-label="대화 내용">
+            <div class="welcome" id="welcome">
+              <div class="welcome-date">★ 우리만의 문서 대화방 ★</div>
+              <div class="welcome-illustration" aria-hidden="true"><div class="paper"><i></i><i></i><i></i><i></i><span>PDF</span></div><img src="/cat.svg" alt=""><span class="spark spark-one">✦</span><span class="spark spark-two">+</span></div>
+              <h1>반가워요, HAEINDEX입니다!</h1>
+              <p>궁금한 건 편하게 물어보세요.<br>내 문서에서 답과 출처를 함께 찾아드릴게요.</p>
+              <div class="welcome-note"><span>TIP</span> 오른쪽에서 문서를 고르면<br>그 문서 안에서만 답을 찾아요.</div>
+              <div class="suggestions" aria-label="질문 예시">
+                <button data-question="취업규칙에서 연차 유급휴가의 조건을 알려줘">연차 휴가 조건이 궁금해요 ↗</button>
+                <button data-question="HXR-MC88의 배터리 충전 방법을 알려줘">카메라 배터리는 어떻게 충전해? ↗</button>
+              </div>
+              <div class="welcome-footer">문서를 읽는 시간, 이제 같이 나눠요 <span>♡</span></div>
+            </div>
+            <div id="messages"></div>
+          </div>
+          <div class="activity" id="activity" role="status" aria-live="polite"><span class="activity-light"></span><span id="activity-text">질문을 기다리고 있어요.</span><span id="elapsed"></span></div>
+          <form id="chat-form" class="composer">
+            <div class="composer-tools"><span class="type-icon" aria-hidden="true">T<span>▰</span></span><button type="button" id="insert-face" title="이모티콘 넣기" aria-label="고양이 이모티콘 넣기">☺</button><button type="button" id="attach" title="PDF 추가" aria-label="PDF 추가">♧</button><span class="scope" id="scope">전체 문서에서 찾기</span><span id="char-count">0 / 2,000</span></div>
+            <div class="input-row"><label class="sr-only" for="question">문서에 질문하기</label><textarea id="question" maxlength="2000" rows="3" placeholder="여기에 궁금한 내용을 적어주세요 :)" required></textarea><button class="send" id="send" type="submit">보내기<span>(Enter) ↵</span></button></div>
+            <div class="composer-footer"><span>Enter 전송 · Shift+Enter 줄바꿈</span><span>답변의 출처를 눌러 원문을 확인하세요.</span></div>
+          </form>
+        </section>
+        <aside class="sidebar" id="sidebar" aria-label="문서 목록">
+          <div class="club-title">Document Club <span>✿</span></div>
+          <div class="profile-card"><div class="avatar"><img src="/cat.svg" alt="HAEINDEX 고양이"></div><strong>HAEINDEX</strong><span class="profile-caption">오늘도 함께 읽는 중 ฅ</span><div class="profile-state"><i></i> AWS Bedrock으로 대화 중</div></div>
+          <div class="doc-heading"><strong>나의 문서 <span id="doc-count">0</span></strong><button id="refresh-docs" title="문서 새로고침" aria-label="문서 새로고침">↻</button></div>
+          <label class="doc-search"><span aria-hidden="true">⌕</span><input type="search" id="doc-filter" placeholder="문서 찾기" aria-label="문서 찾기"></label>
+          <button class="all-docs selected" id="all-docs" aria-pressed="true"><span>▤</span> 전체 문서에서 찾기 <span class="check">✓</span></button>
+          <div id="document-list" class="document-list" aria-label="검색할 문서 선택"><p class="list-state">문서 목록을 불러오는 중…</p></div>
+          <div class="doc-actions"><button id="add-pdf">＋ PDF 추가</button><button id="enhance-docs" disabled title="선택한 문서의 검색용 문맥과 절 카드를 생성합니다">선택 문서 검색 보강</button></div>
+          <div class="club-note"><span>작은 약속</span><p>답은 내 문서에서,<br>근거는 원문 그대로.</p><img src="/cat.svg" alt="" aria-hidden="true"></div>
+          <div class="connection" id="connection"><span class="connection-dot"></span><span id="connection-text">연결 확인 중</span></div>
+        </aside>
+      </div>
+      <footer class="window-status"><span id="status-left">♥ 문서와 조금 더 가까워지는 시간</span><span>LOCAL · PDF CHAT</span></footer>
+    </div>
+  </main>
+  <footer class="taskbar"><button class="start-button" id="restore"><img src="/cat.svg" alt=""> HAEINDEX</button><span class="taskbar-note">내 문서와 AWS Bedrock 대화방.</span><div class="tray"><span id="cat-state" title="포인터를 따라오는 고양이">ฅ</span><time id="clock"></time></div></footer>
+  <div id="cursor-cat" aria-hidden="true"><img src="/cat.svg" alt=""><span>야옹!</span></div>
+  <input type="file" id="pdf-input" accept="application/pdf,.pdf" hidden>
+  <dialog id="help-dialog"><div class="dialog-title">HAEINDEX 사용 안내 <button id="close-help" aria-label="도움말 닫기">×</button></div><div class="dialog-content"><img src="/cat.svg" alt=""><h2>문서랑 친구가 되는 방법</h2><ol><li>오른쪽 목록에서 문서를 골라주세요. 여러 개를 골라 비교할 수도 있어요.</li><li>아래 입력창에 질문하고 Enter를 누르세요.</li><li>답변의 출처 번호를 누르면 PDF의 해당 페이지가 열려요.</li></ol><p>PDF 추가는 최대 32MB까지 가능합니다. 문서를 분석하는 동안 진행 상황이 표시돼요.</p><p>질문은 매번 독립적으로 처리합니다. “그 내용” 대신 문서명과 질문을 구체적으로 적어주세요.</p><p>고양이는 메뉴에서 켜고 끌 수 있어요. 동작 줄이기 설정이나 터치 기기에서는 포인터를 따라가지 않아요.</p><p>대화는 이 창에서만 유지돼요. 필요한 내용은 <b>대화 저장</b>으로 내려받으세요.</p><button id="help-done">알겠어요!</button></div></dialog>
+  <dialog id="cat-dialog"><div class="dialog-title">함께할 고양이 <button id="close-cat" aria-label="고양이 선택 닫기">×</button></div><div class="dialog-content cat-picker"><div class="cat-options"><button data-cat="black"><img src="/cat-black.svg" alt="">검은고양이</button><button data-cat="cheese"><img src="/cat-cheese.svg" alt="">치즈냥이</button><button data-cat="tabby"><img src="/cat-tabby.svg" alt="">얼룩이</button><button data-cat="munchkin"><img src="/cat-munchkin.svg" alt="">먼치킨</button></div><label class="cat-follow"><input id="cat-enabled" type="checkbox" checked> 포인터를 따라다니기</label><button id="cat-done">선택 완료</button></div></dialog>
+  <div id="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

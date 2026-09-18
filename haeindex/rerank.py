@@ -9,8 +9,8 @@ from typing import Any
 from opensearchpy import OpenSearch
 from pydantic import BaseModel, ConfigDict, Field
 
+from haeindex.bedrock import Bedrock
 from haeindex.index import INDEX
-from haeindex.ollama import Ollama
 from haeindex.search import CANDIDATE_K, RRF_K, Hit, char_ngrams
 from haeindex.search import search as run_search
 
@@ -167,7 +167,7 @@ class Harvest(BaseModel):
 
 def harvest(
     os_client: OpenSearch,
-    ol: Ollama,
+    ol: Bedrock,
     *,
     doc_ids: Sequence[str] = (),
     per_chunk: int = 2,
