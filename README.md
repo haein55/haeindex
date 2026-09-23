@@ -1,4 +1,5 @@
 # HAEINDEX
+<img width="1512" height="826" alt="스크린샷 2026-09-18 오후 8 30 22" src="https://github.com/user-attachments/assets/c21bef77-88cf-4d88-bc41-cdb0be152dfb" />
 
 웹 화면에서 PDF를 올리고 자연어로 질문하는 문서 검색·답변 프로젝트입니다.
 PDF를 업로드하면 자동으로 문서를 분석하고 임베딩을 생성해 OpenSearch에 색인합니다.
