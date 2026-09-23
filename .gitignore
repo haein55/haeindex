@@ -11,6 +11,7 @@ screenshots/
 diagrams/
 goldset/
 README*
+!README.md
 
 # Local credentials and private configuration
 .env
