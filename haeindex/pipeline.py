@@ -14,16 +14,20 @@ from haeindex.document_cards import search_cards, search_lexical_docs
 from haeindex.index import INDEX
 from haeindex.llm_tasks import TaskFailure, TaskRunner
 from haeindex.profile import Profile
+from haeindex.profiling import Profiler
 from haeindex.reasoning import (
+    AnswerPatch,
     AnswerReview,
     Draft,
     EvidenceCheck,
+    OverviewDraft,
     QuestionPlan,
     answer_instruction,
-    answer_sentences,
     check_evidence,
+    is_overview,
     plan_question,
     rank_evidence,
+    repair_answer,
     review_answer,
 )
 from haeindex.routing import detect_language, route_question
@@ -35,6 +39,7 @@ class Stage(BaseModel):
     name: str
     detail: str
     chunk_ids: list[str] = Field(default_factory=list)
+    at: float = 0
     seconds: float = 0
 
 
@@ -48,9 +53,11 @@ class PipelineTrace(BaseModel):
     stages: list[Stage] = Field(default_factory=list)
     assessments: list[EvidenceCheck] = Field(default_factory=list)
     reviews: list[AnswerReview] = Field(default_factory=list)
+    repairs: list[AnswerPatch] = Field(default_factory=list)
     calls: int = 0
     cache_hits: int = 0
     events: list[dict] = Field(default_factory=list)
+    spans: list[dict] = Field(default_factory=list)
     error: str = ""
 
 
@@ -107,7 +114,9 @@ def run_pipeline(
 ) -> PipelineTrace:
     runner = TaskRunner(max_calls=max_calls, cache=cache)
     trace = PipelineTrace(question=question, result=Result(query=question))
-    stage_started = time.monotonic()
+    profiler = Profiler()
+    profiler_token = profiler.activate()
+    pipeline_started = stage_started = time.monotonic()
 
     def stage(name: str, detail: str, hits: list[Hit] | None = None) -> None:
         nonlocal stage_started
@@ -115,8 +124,14 @@ def run_pipeline(
         if trace.stages:
             trace.stages[-1].seconds = round(now - stage_started, 3)
         trace.stages.append(
-            Stage(name=name, detail=detail, chunk_ids=[h.chunk_id for h in hits or []])
+            Stage(
+                name=name,
+                detail=detail,
+                chunk_ids=[h.chunk_id for h in hits or []],
+                at=round(now - pipeline_started, 6),
+            )
         )
+        profiler.stage = name
         stage_started = now
         if progress:
             progress(name, detail)
@@ -124,6 +139,11 @@ def run_pipeline(
     try:
         stage("planning", "질문의 요구사항과 조건을 정리합니다")
         route = route_question(question, known_docs, explicit_doc_ids=explicit_docs or [])
+        if route.clarification:
+            trace.documents = route.doc_ids
+            trace.clarification = route.clarification
+            stage("clarifying", route.clarification)
+            return trace
         plan = plan_question(runner, analysis_llm, question, known_docs)
         trace.plan = plan
         multi = len(explicit_docs or []) > 1 or route.allow_multiple_docs
@@ -161,6 +181,7 @@ def run_pipeline(
             candidate_k=50,
             index=index,
             contextual=True,
+            extra_queries=plan.queries[1:3],
         )
         trace.result = base
         if base.degraded:
@@ -236,8 +257,12 @@ def run_pipeline(
             selected = ranked[: max(top_k, 10)]
             check = check_evidence(runner, analysis_llm, question, plan, selected)
             trace.assessments.append(check)
+        by_visual_id = {h.chunk_id: h for h in selected}
         visual_candidates = [
-            h for h in selected if h.source.get("evidence_origin") != "vision_transcription"
+            by_visual_id[cid]
+            for cid in check.visual_chunk_ids()
+            if cid in by_visual_id
+            and by_visual_id[cid].source.get("evidence_origin") != "vision_transcription"
         ]
         if (
             not check.complete(plan.requirements)
@@ -245,7 +270,7 @@ def run_pipeline(
             and vision is not None
             and visual_candidates
         ):
-            stage("reading_pdf", "근거가 부족한 PDF 페이지를 이미지로 다시 확인합니다")
+            stage("reading_pdf", "표·도식·문자 손상이 확인된 근거를 이미지로 다시 확인합니다")
             recovered = recover_pages(
                 visual_candidates[:4],
                 runner=runner,
@@ -264,9 +289,15 @@ def run_pipeline(
             return trace
         if not check.complete(plan.requirements):
             trace.answer = Answer(
-                refusal=Refusal.INSUFFICIENT_EVIDENCE, context=make_context(selected)
+                refusal=Refusal.NOT_FOUND if check.not_found() else Refusal.INSUFFICIENT_EVIDENCE,
+                context=make_context(selected),
             )
-            stage("insufficient", "질문에 답할 원문 근거를 충분히 확인하지 못했습니다")
+            stage(
+                "not_found" if check.not_found() else "insufficient",
+                "보완 검색에서도 질문에 해당하는 내용을 찾지 못했습니다"
+                if check.not_found()
+                else "질문에 답할 원문 근거를 충분히 확인하지 못했습니다",
+            )
             return trace
         supported_ids = list(dict.fromkeys(q.chunk_id for s in check.supports for q in s.sources))
         by_id = {h.chunk_id: h for h in selected}
@@ -295,38 +326,29 @@ def run_pipeline(
         stage("answering", "확인한 원문으로 답변을 작성합니다")
         text = ""
         for repair in range(2):
-            if repair:
-                payload["previous_answer"] = text
-                payload["review"] = (
-                    {
-                        "instructions": trace.reviews[-1].repair_instructions,
-                        "missing": trace.reviews[-1].missing_requirements,
-                        "conflicts": trace.reviews[-1].conflicts,
-                        "issues": [
-                            {
-                                "sentence_id": c.sentence_id,
-                                "sentence": answer_sentences(text).get(c.sentence_id, ""),
-                                "issue": c.issue,
-                            }
-                            for c in trace.reviews[-1].claims
-                            if not c.supported
-                        ],
-                    }
-                    if trace.reviews
-                    else {
-                        "issue": "언어 또는 인용 형식이 맞지 않습니다",
-                    }
+            if repair and trace.reviews:
+                stage("repairing", "검토에서 지적된 문장만 한 번 수정합니다")
+                text, patch = repair_answer(
+                    runner, answer_llm, question, plan, text, trace.reviews[-1], payload
                 )
-                stage("repairing", "빠진 조건이나 인용을 한 번 수정합니다")
-            draft = runner.run(
-                answer_llm,
-                "answer-repair" if repair else "answer-draft",
-                answer_instruction(question),
-                payload,
-                Draft,
-                num_predict=1800,
-            )
-            text, cited = keep_only_known(normalize_citations(draft.text), set(citation_ids))
+                trace.repairs.append(patch)
+            else:
+                if repair:
+                    # 문장 검토에 도달하지 못했으므로 아직 보존할 승인 문장이 없다.
+                    payload["previous_answer"] = text
+                    payload["review"] = {"issue": "언어 또는 인용 형식이 맞지 않습니다"}
+                    stage("repairing", "답변 언어 또는 인용 형식을 한 번 수정합니다")
+                draft = runner.run(
+                    answer_llm,
+                    "answer-repair" if repair else "answer-draft",
+                    answer_instruction(question, plan),
+                    payload,
+                    OverviewDraft if is_overview(plan) else Draft,
+                    num_predict=1800,
+                    max_predict=3600,
+                )
+                text = draft.text
+            text, cited = keep_only_known(normalize_citations(text), set(citation_ids))
             if not cited or not language_matches(text, detect_language(question)):
                 continue
             stage("verifying", "문장별 주장·수치·조건과 인용 원문을 대조합니다")
@@ -335,6 +357,14 @@ def run_pipeline(
             )
             trace.reviews.append(review)
             if review.accepted():
+                if is_overview(plan):
+                    text += (
+                        "\n\n주요 규칙 요약입니다. "
+                        "필요한 항목을 지정하면 세부 조건을 확인할 수 있습니다."
+                        if detect_language(question) == "ko"
+                        else "\n\nThis summarizes the main rules. "
+                        "Ask about a specific item for details."
+                    )
                 trace.answer = Answer(
                     text=text,
                     cited=sorted(cited),
@@ -357,4 +387,6 @@ def run_pipeline(
         trace.calls = runner.calls
         trace.cache_hits = sum(e.cache_hit for e in runner.events)
         trace.events = [e.model_dump() for e in runner.events]
+        trace.spans = profiler.spans
+        profiler.deactivate(profiler_token)
     return trace

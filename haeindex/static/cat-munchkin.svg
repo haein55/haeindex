@@ -2,6 +2,7 @@
   <path fill="#665247" d="M6 15h3V6h6v4h3v2h12v-2h3V6h6v12h3v15h-3v5h-5v4h-6v-7H18v7h-6v-4H9v-5H6z"/>
   <path fill="#c8a680" d="M9 15h3V9h3v6h18V9h3v22h-3v4H15v-4h-3V24H9z"/>
   <path fill="#795f50" d="M18 15h3v4h-3zm9 0h3v4h-3zM9 21h6v3H9zm24 0h6v3h-6z"/>
-  <path fill="#342f31" d="M18 23h3v5h-3zm12 0h3v5h-3zm9 5h6v-8h3v14h-9z"/>
+  <path fill="#342f31" d="M18 23h3v5h-3zm12 0h3v5h-3z"/>
+  <path fill="#c8a680" d="M39 28h6v-8h3v14h-9z"/>
   <path fill="#efaaa4" d="M24 28h3v3h-3z"/><path fill="#f7e7d0" d="M21 33h9v3h-9z"/>
 </svg>

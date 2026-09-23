@@ -68,6 +68,63 @@ def test_static_assets_are_served_without_external_dependencies():
     h.do_GET()
     assert h.responses[0][0] == 200
     assert b'<html lang="ko">' in h.responses[0][1]
+    assert b"Searchdoc" in h.responses[0][1]
+    assert b'data-care="fish"' in h.responses[0][1]
+    assert b'data-care="kibble"' in h.responses[0][1]
+    assert b'data-care="pet"' in h.responses[0][1]
+    assert b"multiple" in h.responses[0][1]
+
+
+def test_document_list_keeps_unindexed_pdfs_visible(tmp_path, monkeypatch):
+    from haeindex import web
+
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    (inbox / "ready.pdf").write_bytes(text_pdf())
+    (inbox / "pending.pdf").write_bytes(text_pdf())
+    (inbox / "long.pdf").write_bytes(text_pdf())
+    os_client = SimpleNamespace(close=lambda: None)
+    monkeypatch.setattr(web, "client", lambda: os_client)
+    monkeypatch.setattr(
+        web,
+        "doc_stats",
+        lambda c: {
+            "ready": {"chunks": 3, "last_page": 1},
+            "long": {"chunks": 100, "last_page": 120},
+        },
+    )
+    monkeypatch.setattr(web, "load_index_manifest", lambda doc_id: None)
+    monkeypatch.setattr(web, "page_count", lambda path: 441 if path.stem == "long" else 1)
+    result = Application(inbox).documents()
+    by_id = {doc["id"]: doc for doc in result["documents"]}
+    assert result["search_available"] is True
+    assert by_id["ready"]["indexed"] is True
+    assert by_id["ready"]["index_complete"] is True
+    assert by_id["pending"]["indexed"] is False
+    assert by_id["pending"]["pages"] == 1
+    assert by_id["long"]["indexed"] is True
+    assert by_id["long"]["index_complete"] is False
+    assert by_id["long"]["indexed_through_page"] == 120
+
+
+def test_batch_reindex_continues_after_one_document_fails(tmp_path, monkeypatch):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    (inbox / "good.pdf").write_bytes(text_pdf())
+    (inbox / "bad.pdf").write_bytes(text_pdf())
+    app = Application(inbox)
+
+    def index_one(path, *, progress):
+        if path.stem == "bad":
+            raise ValueError("cannot read")
+        return {"doc_id": "good", "chunks": 1, "pages": 1, "report": {}}
+
+    monkeypatch.setattr(app, "_index_pdf", index_one)
+    events = []
+    result = app.reindex(["bad", "good"], progress=lambda *event: events.append(event))
+    assert len(result["documents"]) == 1
+    assert result["failures"][0]["document"] == "bad.pdf"
+    assert any(name == "index_error" for name, _ in events)
 
 
 def test_only_one_model_job_and_errors_are_observable():
@@ -142,6 +199,7 @@ def test_pdf_upload_extracts_real_text_before_indexing(tmp_path, monkeypatch):
     monkeypatch.setattr(web, "client", lambda: os_client)
     monkeypatch.setattr(web, "doc_counts", lambda c: {})
     monkeypatch.setattr(web, "ensure_index", lambda c: None)
+    monkeypatch.setattr(web, "replace_doc", lambda *a, **k: 0)
     captured = []
 
     def index_chunks(client, chunks, vectors):

@@ -37,11 +37,13 @@ class Refusal(enum.StrEnum):
     SEARCH_DEGRADED = "search_degraded"
     MODEL_FAILURE = "model_failure"
     INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+    NOT_FOUND = "not_found"
 
 
 MESSAGES = {
     Refusal.MODEL_FAILURE: "모델 처리 중 문제가 생겼습니다. 잠시 후 다시 시도해 주세요.",
     Refusal.INSUFFICIENT_EVIDENCE: "질문에 답할 원문 근거를 충분히 확인하지 못했습니다.",
+    Refusal.NOT_FOUND: "검색한 문서에서 질문에 해당하는 내용을 찾지 못했습니다.",
     Refusal.NO_HITS: "문서에서 확인할 수 없습니다. (검색 결과 없음)",
     Refusal.LOW_CONFIDENCE: "문서에서 확인할 수 없습니다. (관련도가 임계값 미만)",
     Refusal.NO_CITATIONS: "⚠ 인용 없음 — 근거 없이 생성된 답변으로 판단해 폐기했습니다.",

@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from haeindex.bedrock import Bedrock
 from haeindex.index import INDEX, SOURCE_EXCLUDE
+from haeindex.profiling import span
 
 TOP_K = 5
 CANDIDATE_K = 50
@@ -191,9 +192,10 @@ def search(
             vecs = embedder.embed([query, *extra_queries])
             bodies["knn"] = knn_body(vecs[0], filters, candidate_k)
             if contextual:
-                props = os_client.indices.get_mapping(index=index)[index]["mappings"].get(
-                    "properties", {}
-                )
+                with span("opensearch", "인덱스 매핑 확인", index=index):
+                    props = os_client.indices.get_mapping(index=index)[index]["mappings"].get(
+                        "properties", {}
+                    )
                 if "context_embedding" in props:
                     bodies["context-knn"] = knn_body(
                         vecs[0],
@@ -208,7 +210,9 @@ def search(
 
     results: dict[str, list[dict[str, Any]]] = {}
     for leg, body in bodies.items():
-        results[leg] = os_client.search(index=index, body=body)["hits"]["hits"]
+        with span("opensearch", "검색", index=index, leg=leg) as metrics:
+            results[leg] = os_client.search(index=index, body=body)["hits"]["hits"]
+            metrics["hits"] = len(results[leg])
 
     fused = rrf_fuse(results)
     kept, dropped = dedupe(fused)

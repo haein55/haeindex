@@ -13,7 +13,7 @@
   <div class="desktop-caption" aria-hidden="true"><img src="/cat.svg" alt=""> 내 문서에 접속 중 . . .</div>
   <main class="window" id="window" aria-label="HAEINDEX 대화창">
     <header class="titlebar">
-      <div class="window-title"><img src="/cat.svg" alt=""><span>HAEINDEX <span class="title-extra">- 내 문서와 대화하기</span></span></div>
+      <div class="window-title"><img src="/cat.svg" alt=""><span>HAEINDEX <span class="title-extra">- 문서와 대화하기</span></span></div>
       <div class="window-controls">
         <button id="minimize" aria-label="창 최소화" title="최소화">▁</button>
         <button id="maximize" aria-label="창 크기 변경" title="크게 보기">□</button>
@@ -22,9 +22,9 @@
     </header>
     <nav class="menubar" aria-label="메뉴">
       <button id="file-menu">파일<span>(F)</span></button>
-      <button id="cat-menu" aria-haspopup="dialog">고양이<span>(C)</span> ▾</button>
+      <button id="cat-menu" aria-haspopup="dialog">친구<span>(C)</span> ▾</button>
       <button id="help-menu">도움말<span>(H)</span></button>
-      <span class="version">HAEINDEX / AWS Bedrock</span>
+      <span class="version">HAEINDEX / Searchdoc</span>
     </nav>
     <div class="app-shell">
       <div class="toolbar">
@@ -37,7 +37,7 @@
       </div>
       <div class="workspace">
         <section class="conversation" aria-label="문서 대화">
-          <div class="room-topic"><span class="topic-label">[대화상대]</span><strong id="room-title">내 문서들</strong><span class="room-online">● 온라인 친구</span></div>
+          <div class="room-topic"><span class="topic-label">[대화상대]</span><strong id="room-title">내 문서들</strong><span class="room-online">● 온라인</span></div>
           <div class="chat-log" id="chat-log" tabindex="0" aria-label="대화 내용">
             <div class="welcome" id="welcome">
               <div class="welcome-date">★ 우리만의 문서 대화방 ★</div>
@@ -49,7 +49,7 @@
                 <button data-question="취업규칙에서 연차 유급휴가의 조건을 알려줘">연차 휴가 조건이 궁금해요 ↗</button>
                 <button data-question="HXR-MC88의 배터리 충전 방법을 알려줘">카메라 배터리는 어떻게 충전해? ↗</button>
               </div>
-              <div class="welcome-footer">문서를 읽는 시간, 이제 같이 나눠요 <span>♡</span></div>
+              <div class="welcome-footer">복잡한 문서, 빠르게 질문하자 <span>♡</span></div>
             </div>
             <div id="messages"></div>
           </div>
@@ -61,25 +61,79 @@
           </form>
         </section>
         <aside class="sidebar" id="sidebar" aria-label="문서 목록">
-          <div class="club-title">Document Club <span>✿</span></div>
-          <div class="profile-card"><div class="avatar"><img src="/cat.svg" alt="HAEINDEX 고양이"></div><strong>HAEINDEX</strong><span class="profile-caption">오늘도 함께 읽는 중 ฅ</span><div class="profile-state"><i></i> AWS Bedrock으로 대화 중</div></div>
+          <div class="club-title">CAT'S HOME <span>✿</span></div>
+          <div class="cat-care">
+            <div class="care-caption"><span id="room-caption">SearchCat 집</span><button id="room-pause" type="button" aria-pressed="false" aria-label="고양이 자동 산책 멈추기">Ⅱ 산책 멈춤</button></div>
+            <div class="cat-room" id="cat-room" role="group" tabindex="0" aria-label="고양이 방. 바닥을 누르거나 방향키로 고양이를 불러 보세요.">
+              <svg class="room-scenery" viewBox="0 0 240 200" aria-hidden="true" focusable="false">
+                <defs>
+                  <pattern id="room-wallpaper" width="16" height="16" patternUnits="userSpaceOnUse"><rect width="16" height="16" fill="#faf3df"/><path d="M0 0v16" stroke="#ece8cd" stroke-width="3"/></pattern>
+                  <pattern id="room-wood" width="80" height="30" patternUnits="userSpaceOnUse"><rect width="80" height="30" fill="#ddc7a3"/><path d="M0 0h80M0 0v30" fill="none" stroke="#cbb48f"/><path d="M8 5h24m16 19h22" stroke="#e9d7ba"/></pattern>
+                </defs>
+                <rect width="240" height="126" fill="url(#room-wallpaper)"/>
+                <rect y="126" width="240" height="74" fill="url(#room-wood)"/>
+                <path d="M0 120h240v7H0z" fill="#bca785"/><path d="M0 119h240" stroke="#fff9e9" stroke-width="3"/>
+                <path d="M30 94h58l38 55H65z" fill="#fff4ca" opacity=".25"/>
+                <rect x="20" y="20" width="74" height="76" rx="2" fill="#a3b59a"/>
+                <rect x="24" y="24" width="66" height="66" fill="#fffbee"/>
+                <rect x="28" y="28" width="58" height="58" fill="#c7e1dc"/>
+                <path d="M28 72h58v14H28z" fill="#b2cba2"/><path d="M28 80h58v6H28z" fill="#96b58a"/>
+                <path d="M36 43h7v-4h14v4h7v6H36zm29 17h6v-4h10v4h5v5H65z" fill="#fffdf2"/>
+                <circle cx="73" cy="39" r="7" fill="#f4d28c"/>
+                <path d="M55 27v60M27 57h60" stroke="#fffbee" stroke-width="4"/>
+                <path d="M17 93h80v5H17z" fill="#d3bd98"/><path d="M17 93h80" stroke="#f7ead1" stroke-width="2"/>
+                <path d="M155 23h42v43h-42z" fill="#bb9f7f"/><path d="M159 27h34v35h-34z" fill="#fffaf0"/>
+                <path d="M165 37h5v6h-5zm9-4h5v6h-5zm9 4h5v6h-5zm-12 9h3v-4h5v4h3v7h-11z" fill="#cb9890"/>
+                <path d="M145 84h68v5h-68z" fill="#c5af8d"/><path d="M151 89v6m55-6v6" stroke="#ac9475" stroke-width="3"/>
+                <path d="M150 66h9v18h-9z" fill="#a7b7a1"/><path d="M161 70h8v14h-8z" fill="#cda496"/><path d="M172 65h7v19h-7z" fill="#d8bc86"/>
+                <path d="M192 74h13v10h-13z" fill="#f2e3c9"/><path d="M195 71h7v4h-7z" fill="#9dab83"/>
+                <ellipse cx="183" cy="145" rx="34" ry="7" fill="#b9a483" opacity=".45"/>
+                <rect x="153" y="120" width="63" height="25" rx="11" fill="#83967a"/>
+                <rect x="158" y="123" width="53" height="17" rx="8" fill="#c0cda8"/>
+                <path d="M166 127h35v9h-35z" fill="#f4e8cc"/><path d="M157 140h55" stroke="#75896c" stroke-width="3"/>
+                <path d="M51 156l15-9h65l17 9v20l-17 9H66l-15-9z" fill="#bc9380"/>
+                <path d="M54 157l13-7h63l15 7v17l-15 8H67l-13-8z" fill="#edc4a5"/>
+                <path d="M62 158h74m-74 17h74" stroke="#fff0d3" stroke-width="3"/>
+                <path d="M47 159h5m-5 7h5m-5 7h5m97-14h5m-5 7h5m-5 7h5" stroke="#e6c3a0" stroke-width="2"/>
+                <ellipse cx="28" cy="142" rx="16" ry="4" fill="#b4a17e" opacity=".35"/>
+                <path d="M18 124h21l-3 17H21z" fill="#bd8c70"/><path d="M17 122h23v5H17z" fill="#d3a486"/>
+                <path d="M28 123V91" stroke="#7e9268" stroke-width="3"/>
+                <path d="M28 108c-14 0-16-11-14-15 11-1 17 5 14 15zm1-6c0-14 9-18 15-15 0 10-5 16-15 15zm-1 17c-9 0-13-5-12-11 8-1 13 4 12 11zm2-7c2-9 10-12 15-8-2 7-7 11-15 8z" fill="#8fa879"/>
+                <path d="M22 176c6 3 0 10 10 11h8" fill="none" stroke="#b88684" stroke-width="2"/>
+                <circle cx="23" cy="174" r="8" fill="#cb9996"/><path d="M17 169l12 10m-15-6 14-3m-10 11 8-15" stroke="#e6bcb2" fill="none"/>
+              </svg>
+              <span class="room-destination" id="room-destination" aria-hidden="true">✧</span>
+              <button class="room-bowl" id="room-bowl" type="button" data-care="kibble" aria-label="밥그릇에 사료 주기" title="눌러서 사료 채우기"><span class="bowl-food" id="room-food" aria-hidden="true"></span><span class="bowl-dish" aria-hidden="true"></span></button>
+              <button class="care-avatar" id="care-cat" type="button" aria-label="고양이 쓰다듬기" title="쓰담쓰담 해주세요">
+                <span class="cat-shadow" aria-hidden="true"></span><span class="cat-facing"><img src="/cat.svg" alt="" class="cat-sprite"></span>
+                <span class="care-reaction" id="care-reaction" aria-hidden="true">♥</span>
+              </button>
+            </div>
+            <p class="room-hint">바닥을 톡 눌러 불러보세요 <span aria-hidden="true">🎶 🎶 🎶</span></p>
+            <span class="cat-mood" id="cat-mood" role="status" aria-live="polite">햇살 아래서 쉬고 있어요.</span>
+            <div class="cat-care-actions" aria-label="고양이 돌보기 메뉴">
+              <button type="button" data-care="fish"><span aria-hidden="true">🐟</span>생선</button>
+              <button type="button" data-care="kibble"><span aria-hidden="true">🍚</span>사료</button>
+              <button type="button" data-care="pet"><span aria-hidden="true">😻</span>쓰담</button>
+            </div>
+          </div>
           <div class="doc-heading"><strong>나의 문서 <span id="doc-count">0</span></strong><button id="refresh-docs" title="문서 새로고침" aria-label="문서 새로고침">↻</button></div>
           <label class="doc-search"><span aria-hidden="true">⌕</span><input type="search" id="doc-filter" placeholder="문서 찾기" aria-label="문서 찾기"></label>
           <button class="all-docs selected" id="all-docs" aria-pressed="true"><span>▤</span> 전체 문서에서 찾기 <span class="check">✓</span></button>
           <div id="document-list" class="document-list" aria-label="검색할 문서 선택"><p class="list-state">문서 목록을 불러오는 중…</p></div>
-          <div class="doc-actions"><button id="add-pdf">＋ PDF 추가</button><button id="enhance-docs" disabled title="선택한 문서의 검색용 문맥과 절 카드를 생성합니다">선택 문서 검색 보강</button></div>
+          <div class="doc-actions"><button id="add-pdf">＋ PDF 추가</button><button id="reindex-pending" disabled>색인 필요한 문서 모두 처리</button><button id="enhance-docs" disabled title="선택한 문서의 검색용 문맥과 절 카드를 생성합니다">선택 문서 검색 보강</button></div>
           <div class="club-note"><span>작은 약속</span><p>답은 내 문서에서,<br>근거는 원문 그대로.</p><img src="/cat.svg" alt="" aria-hidden="true"></div>
           <div class="connection" id="connection"><span class="connection-dot"></span><span id="connection-text">연결 확인 중</span></div>
         </aside>
       </div>
-      <footer class="window-status"><span id="status-left">♥ 문서와 조금 더 가까워지는 시간</span><span>LOCAL · PDF CHAT</span></footer>
+      <footer class="window-status"><span id="status-left">빠르게 찾아봐요</span><span>LOCAL · PDF CHAT</span></footer>
     </div>
   </main>
-  <footer class="taskbar"><button class="start-button" id="restore"><img src="/cat.svg" alt=""> HAEINDEX</button><span class="taskbar-note">내 문서와 AWS Bedrock 대화방.</span><div class="tray"><span id="cat-state" title="포인터를 따라오는 고양이">ฅ</span><time id="clock"></time></div></footer>
+  <footer class="taskbar"><button class="start-button" id="restore"><img src="/cat.svg" alt=""> HAEINDEX</button><span class="taskbar-note">내 문서와 Searchdoc 대화방.</span><div class="tray"><span id="cat-state" title="포인터를 따라오는 고양이">ฅ</span><time id="clock"></time></div></footer>
   <div id="cursor-cat" aria-hidden="true"><img src="/cat.svg" alt=""><span>야옹!</span></div>
-  <input type="file" id="pdf-input" accept="application/pdf,.pdf" hidden>
-  <dialog id="help-dialog"><div class="dialog-title">HAEINDEX 사용 안내 <button id="close-help" aria-label="도움말 닫기">×</button></div><div class="dialog-content"><img src="/cat.svg" alt=""><h2>문서랑 친구가 되는 방법</h2><ol><li>오른쪽 목록에서 문서를 골라주세요. 여러 개를 골라 비교할 수도 있어요.</li><li>아래 입력창에 질문하고 Enter를 누르세요.</li><li>답변의 출처 번호를 누르면 PDF의 해당 페이지가 열려요.</li></ol><p>PDF 추가는 최대 32MB까지 가능합니다. 문서를 분석하는 동안 진행 상황이 표시돼요.</p><p>질문은 매번 독립적으로 처리합니다. “그 내용” 대신 문서명과 질문을 구체적으로 적어주세요.</p><p>고양이는 메뉴에서 켜고 끌 수 있어요. 동작 줄이기 설정이나 터치 기기에서는 포인터를 따라가지 않아요.</p><p>대화는 이 창에서만 유지돼요. 필요한 내용은 <b>대화 저장</b>으로 내려받으세요.</p><button id="help-done">알겠어요!</button></div></dialog>
-  <dialog id="cat-dialog"><div class="dialog-title">함께할 고양이 <button id="close-cat" aria-label="고양이 선택 닫기">×</button></div><div class="dialog-content cat-picker"><div class="cat-options"><button data-cat="black"><img src="/cat-black.svg" alt="">검은고양이</button><button data-cat="cheese"><img src="/cat-cheese.svg" alt="">치즈냥이</button><button data-cat="tabby"><img src="/cat-tabby.svg" alt="">얼룩이</button><button data-cat="munchkin"><img src="/cat-munchkin.svg" alt="">먼치킨</button></div><label class="cat-follow"><input id="cat-enabled" type="checkbox" checked> 포인터를 따라다니기</label><button id="cat-done">선택 완료</button></div></dialog>
+  <input type="file" id="pdf-input" accept="application/pdf,.pdf" multiple hidden>
+  <dialog id="help-dialog"><div class="dialog-title">HAEINDEX 사용 안내 <button id="close-help" aria-label="도움말 닫기">×</button></div><div class="dialog-content"><img src="/cat.svg" alt=""><h2>문서랑 친구가 되는 방법</h2><ol><li>오른쪽 목록에서 문서를 골라주세요. 여러 개를 골라 비교할 수도 있어요.</li><li>아래 입력창에 질문하고 Enter를 누르세요.</li><li>답변의 출처 번호를 누르면 PDF의 해당 페이지가 열려요.</li></ol><p>PDF 추가는 최대 32MB까지 가능합니다. 문서를 분석하는 동안 진행 상황이 표시돼요.</p><p>질문은 매번 독립적으로 처리합니다. “그 내용” 대신 문서명과 질문을 구체적으로 적어주세요.</p><p>고양이와 서치독은 친구 메뉴에서 선택할 수 있어요. 동작 줄이기 설정이나 터치 기기에서는 포인터를 따라가지 않아요.</p><p>대화는 이 창에서만 유지돼요. 필요한 내용은 <b>대화 저장</b>으로 내려받으세요.</p><button id="help-done">알겠어요!</button></div></dialog>
+  <dialog id="cat-dialog"><div class="dialog-title">함께할 친구 <button id="close-cat" aria-label="친구 선택 닫기">×</button></div><div class="dialog-content cat-picker"><div class="cat-options"><button data-cat="black"><img src="/cat-black.svg" alt="">검은고양이</button><button data-cat="cheese"><img src="/cat-cheese.svg" alt="">치즈냥이</button><button data-cat="tabby"><img src="/cat-tabby.svg" alt="">얼룩이</button><button data-cat="munchkin"><img src="/cat-munchkin.svg" alt="">먼치킨</button><button data-cat="searchdog"><img src="/searchdog.svg" alt=""><span>Searchdog <small>서치독 · 함께 산책할래?</small></span></button></div><label class="cat-follow"><input id="cat-enabled" type="checkbox" checked> 포인터를 따라다니기</label><button id="cat-done">선택 완료</button></div></dialog>
   <div id="toast" role="status" aria-live="polite" hidden></div>
 </body>
 </html>

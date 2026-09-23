@@ -11,6 +11,7 @@ from haeindex.bedrock import EMBED_DIM, Bedrock
 from haeindex.document_cards import DOC_INDEX, DocumentCard, ensure_doc_index, index_card
 from haeindex.index import INDEX, SOURCE_EXCLUDE, settings
 from haeindex.llm_tasks import TaskFailure, TaskRunner
+from haeindex.profiling import span
 from haeindex.reasoning import Record, compact, quote_exists
 
 SECTION_INDEX = "haeindex_bedrock_sections_v1"
@@ -369,8 +370,9 @@ def merge_section_cards(runner, llm, doc_id, cards):
 def section_candidates(
     os_client, query: str, doc_ids: Sequence[str], top_k: int = 3, embedder: Bedrock | None = None
 ) -> list[str]:
-    if not os_client.indices.exists(index=SECTION_INDEX):
-        return []
+    with span("opensearch", "절 카드 인덱스 확인", index=SECTION_INDEX):
+        if not os_client.indices.exists(index=SECTION_INDEX):
+            return []
     filters = [{"terms": {"doc_id": list(doc_ids)}}] if doc_ids else []
     bodies = [
         {
@@ -387,8 +389,10 @@ def section_candidates(
             {"size": top_k, "_source": ["chunk_ids"], "query": {"knn": {"embedding": knn}}}
         )
     scores, rows = {}, {}
-    for body in bodies:
-        result = os_client.search(index=SECTION_INDEX, body=body)
+    for number, body in enumerate(bodies):
+        leg = "bm25" if number == 0 else "knn"
+        with span("opensearch", "절 카드 검색", index=SECTION_INDEX, leg=leg):
+            result = os_client.search(index=SECTION_INDEX, body=body)
         for rank, hit in enumerate(result["hits"]["hits"], 1):
             cid = hit["_id"]
             scores[cid] = scores.get(cid, 0) + 1 / (60 + rank)

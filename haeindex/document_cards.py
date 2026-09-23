@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from haeindex.bedrock import EMBED_DIM, Bedrock, Truncated
 from haeindex.chunks import Chunk
 from haeindex.index import INDEX, settings
+from haeindex.profiling import span
 
 DOC_INDEX = "haeindex_bedrock_docs_v1"
 DOC_CANDIDATES = 3
@@ -279,11 +280,14 @@ def search_cards(
     candidate_k: int = 20,
     name: str = DOC_INDEX,
 ) -> list[CardHit]:
-    if not os_client.indices.exists(index=name):
-        return []
+    with span("opensearch", "문서 카드 인덱스 확인", index=name):
+        if not os_client.indices.exists(index=name):
+            return []
     vector = embedder.embed([query])[0]
-    bm25 = os_client.search(index=name, body=card_bm25_body(query, candidate_k))
-    knn = os_client.search(index=name, body=card_knn_body(vector, candidate_k))
+    with span("opensearch", "문서 카드 검색", index=name, leg="bm25"):
+        bm25 = os_client.search(index=name, body=card_bm25_body(query, candidate_k))
+    with span("opensearch", "문서 카드 검색", index=name, leg="knn"):
+        knn = os_client.search(index=name, body=card_knn_body(vector, candidate_k))
     results = {"bm25": bm25["hits"]["hits"], "knn": knn["hits"]["hits"]}
     return fuse_card_hits(results)[:top_k]
 
@@ -296,14 +300,17 @@ def search_lexical_docs(
     index: str = INDEX,
 ) -> list[str]:
     """문서 카드가 놓치는 희귀 원문 용어를 전역 BM25에서 문서 단위로 보존한다."""
-    if not os_client.indices.exists(index=index):
-        return []
+    with span("opensearch", "원문 인덱스 확인", index=index):
+        if not os_client.indices.exists(index=index):
+            return []
     from haeindex.search import bm25_body
 
     body = bm25_body(query, [], top_k)
     body["_source"] = ["doc_id"]
     body["collapse"] = {"field": "doc_id"}
-    rows = os_client.search(index=index, body=body)["hits"]["hits"]
+    with span("opensearch", "문서명 키워드 검색", index=index) as metrics:
+        rows = os_client.search(index=index, body=body)["hits"]["hits"]
+        metrics["hits"] = len(rows)
     return list(dict.fromkeys(str(row["_source"]["doc_id"]) for row in rows))
 
 

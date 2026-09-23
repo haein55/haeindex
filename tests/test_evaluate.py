@@ -50,6 +50,16 @@ def test_여러_쪽에_걸친_청크는_범위로_본다() -> None:
     assert covered_targets(chunk(3, 5), q(pages=[4])) == {"p4"}
 
 
+@pytest.mark.parametrize("sections", [[], ["d#s0001"]])
+def test_다른_문서의_같은_페이지나_절은_정답이_아니다(sections) -> None:
+    question = q(pages=[3], sections=sections)
+    wrong = {**chunk(3, sections=sections), "doc_id": "other"}
+    score = score_query(question, [wrong, chunk(3, sections=sections)], 5)
+    assert covered_targets(wrong, question) == set()
+    assert score.first_rank == 2
+    assert score.rr == 0.5
+
+
 def test_정답을_1위에_놓으면_만점이다() -> None:
     s = score_query(q(pages=[3]), [chunk(3), chunk(9)], 5)
     assert s.ndcg == 1.0

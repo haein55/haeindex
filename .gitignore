@@ -6,3 +6,29 @@ work/
 .pytest_cache/
 .DS_Store
 data/
+docs/
+
+# Local credentials and private configuration
+.env
+.env.*
+!.env.example
+.aws/
+.ssh/
+.codex/
+.agents/
+secrets/
+credentials
+credentials.*
+secrets.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.kdbx
+
+# Uploaded documents, local logs and databases
+*.pdf
+*.log
+*.sqlite
+*.sqlite3
+*.db

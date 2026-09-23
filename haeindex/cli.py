@@ -43,6 +43,7 @@ from haeindex.headings import (
     weight_coverage,
 )
 from haeindex.index import client, doc_counts, ensure_index, index_chunks, replace_doc
+from haeindex.index_manifest import save as save_index_manifest
 from haeindex.listwise import DEPTH as LISTWISE_DEPTH
 from haeindex.listwise import rerank as listwise_rerank
 from haeindex.load_pdf import (
@@ -291,8 +292,9 @@ def profile(
 
 
 def _chunks_for(pdf: Path, prof: Profile, max_chars: int) -> tuple[list, list, str]:
+    # head_pages는 구조 판정을 위한 표본 범위일 뿐이다. 색인은 반드시 문서 전체를 읽는다.
     blocks = []
-    for p in load_pages(pdf, list(range(1, prof.head_pages + 1))):
+    for p in load_pages(pdf, list(range(1, prof.n_pages + 1))):
         blocks += page_blocks(p, space_ratio=prof.space_ratio)
 
     if prof.heading_method == "none":
@@ -346,7 +348,7 @@ def index(
     max_chars: Annotated[int, typer.Option("--max-chars")] = 1200,
     accuracy: Annotated[
         bool, typer.Option("--accuracy/--no-accuracy", help="검색 문맥·조건·절 카드 보강")
-    ] = True,
+    ] = False,
     with_queries: Annotated[
         bool, typer.Option("--with-queries", help="가상 질문 생성. 청크당 LLM 1회")
     ] = False,
@@ -384,6 +386,8 @@ def index(
 
     gone = replace_doc(os_client, prof.doc_id)
     ok, errors = index_chunks(os_client, chs, vectors, queries=gen, enrichments=metadata)
+    if not errors:
+        save_index_manifest(prof.doc_id, pages=prof.n_pages, chunks=ok)
     if with_metadata and card is not None and card_vector is not None:
         ensure_doc_index(os_client)
         index_card(os_client, card, card_vector)
@@ -663,6 +667,9 @@ def ask(
     )
     if not auto_doc and not explicit:
         route = route.model_copy(update={"doc_ids": [], "reason": "자동 라우팅 꺼짐"})
+    if route.clarification:
+        typer.echo(route.clarification)
+        return
     wanted = route.doc_ids
     with model_client("answer", model=model, num_ctx=num_ctx) as ol:
         if auto_doc and not wanted:
@@ -757,6 +764,35 @@ def _show_trace(trace, path=None):
     if slowest:
         summary = " · ".join(f"{s.name} {s.seconds:.2f}초" for s in slowest)
         typer.echo(f"  [느린 단계 {summary}]")
+    if trace.spans:
+        labels = {
+            "bedrock.chat": "생성 모델",
+            "bedrock.embed": "Titan",
+            "opensearch": "OpenSearch",
+            "pdf": "PDF",
+        }
+        totals = {
+            category: sum(
+                float(item.get("seconds", 0))
+                for item in trace.spans
+                if item.get("category") == category
+            )
+            for category in labels
+        }
+        local = max(0.0, total - sum(totals.values()))
+        resource_parts = [
+            *(f"{labels[key]} {value:.2f}초" for key, value in totals.items()),
+            f"로컬 {local:.2f}초",
+        ]
+        resources = " · ".join(
+            resource_parts
+        )
+        typer.echo(f"  [시간 사용처 {resources}]")
+        input_tokens = sum(int(item.get("input_tokens", 0)) for item in trace.spans)
+        output_tokens = sum(int(item.get("output_tokens", 0)) for item in trace.spans)
+        typer.echo(
+            f"  [외부 호출 {len(trace.spans)}건 · 토큰 {input_tokens:,}→{output_tokens:,}]"
+        )
 
 
 @app.command()

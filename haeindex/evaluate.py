@@ -78,6 +78,8 @@ class Goldset(BaseModel):
 
 
 def covered_targets(source: dict[str, Any], question: Question) -> set[str]:
+    if source.get("doc_id") != question.doc_id:
+        return set()
     if question.sections:
         return set(source.get("section_ids", [])) & set(question.sections)
     start = int(source.get("page", 0))

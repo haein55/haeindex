@@ -21,6 +21,7 @@ class Route(BaseModel):
     doc_ids: list[str] = Field(default_factory=list)
     allow_multiple_docs: bool = False
     reason: str = "전체 검색"
+    clarification: str = ""
 
 
 def detect_language(text: str) -> str:
@@ -73,17 +74,31 @@ def route_question(
     explicit_doc_ids: Sequence[str] = (),
 ) -> Route:
     multi = is_multi_document_question(question)
+    mentioned = mentioned_docs(question, doc_ids)
     if explicit_doc_ids:
+        selected = list(dict.fromkeys(explicit_doc_ids))
+        missing = [doc for doc in mentioned if doc not in selected]
+        clarification = ""
+        if len(mentioned) > 1 and missing:
+            names = ", ".join(missing)
+            clarification = (
+                f"질문에 함께 언급된 {names} 문서가 현재 검색 범위에 없습니다. "
+                "해당 문서를 함께 선택하거나 전체 문서에서 다시 질문해 주세요."
+                if detect_language(question) == "ko"
+                else f"The question also names {names}, outside the selected documents. "
+                "Select those documents too, or search all documents."
+            )
         return Route(
             language=detect_language(question),
-            doc_ids=list(dict.fromkeys(explicit_doc_ids)),
-            allow_multiple_docs=multi or len(explicit_doc_ids) > 1,
+            doc_ids=selected,
+            allow_multiple_docs=multi or len(selected) > 1,
             reason="--doc 명시",
+            clarification=clarification,
         )
-    mentioned = mentioned_docs(question, doc_ids)
     return Route(
         language=detect_language(question),
         doc_ids=mentioned,
-        allow_multiple_docs=multi,
+        # 적용·해당 여부처럼 '비교'라는 말 없이 여러 문서를 연결하는 질문도 보존한다.
+        allow_multiple_docs=multi or len(mentioned) > 1,
         reason="질문의 파일명" if mentioned else "전체 검색",
     )

@@ -10,6 +10,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ValidationError
 
 from haeindex.bedrock import Bedrock, BedrockError, Truncated, bedrock_model
+from haeindex.profiling import reset_task, set_task
 
 CACHE_VERSION = "accuracy-v1"
 DATA_RULE = (
@@ -38,6 +39,9 @@ class TaskEvent(BaseModel):
     cache_hit: bool = False
     error: str = ""
     input_sha256: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    server_latency_ms: int = 0
 
 
 def decode_object(raw: str) -> Any:
@@ -73,6 +77,7 @@ class TaskRunner:
         schema: type[T],
         *,
         num_predict: int = 1400,
+        max_predict: int | None = None,
         images: list[str] | None = None,
         retries: int = 1,
         use_cache: bool = True,
@@ -92,6 +97,7 @@ class TaskRunner:
                 body,
                 schema.model_json_schema(),
                 num_predict,
+                max_predict,
                 getattr(llm, "num_ctx", 8192),
                 [hashlib.sha256(image.encode()).hexdigest() for image in images or []],
             ],
@@ -110,8 +116,10 @@ class TaskRunner:
             except (ValidationError, OSError):
                 pass
         system = DATA_RULE + "\n" + instruction
-        if (len(system) + len(body)) / 1.6 + num_predict > getattr(llm, "num_ctx", 8192) * 0.90:
+        output_room = int(getattr(llm, "num_ctx", 8192) * 0.90 - (len(system) + len(body)) / 1.6)
+        if num_predict > output_room:
             raise TaskFailure(f"{task}: 입력과 출력 예약량이 컨텍스트 예산을 넘습니다")
+        output_limit = min(max_predict or num_predict, output_room)
         error = ""
         for attempt in range(retries + 1):
             if self.calls >= self.max_calls:
@@ -123,12 +131,19 @@ class TaskRunner:
             started = time.monotonic()
             event = TaskEvent(task=task, model=model, input_sha256=key)
             try:
-                reply = llm.chat(
-                    [{"role": "system", "content": system}, message],
-                    response_schema=schema.model_json_schema(),
-                    num_predict=num_predict,
-                    seed=attempt,
-                )
+                task_token = set_task(task)
+                try:
+                    reply = llm.chat(
+                        [{"role": "system", "content": system}, message],
+                        response_schema=schema.model_json_schema(),
+                        num_predict=num_predict,
+                        seed=attempt,
+                    )
+                finally:
+                    reset_task(task_token)
+                event.input_tokens = reply.input_tokens
+                event.output_tokens = reply.output_tokens
+                event.server_latency_ms = reply.server_latency_ms
                 value = schema.model_validate(decode_object(reply.content))
                 if path is not None:
                     path.parent.mkdir(parents=True, exist_ok=True)
@@ -139,6 +154,12 @@ class TaskRunner:
             except (ValueError, Truncated, BedrockError) as exc:
                 error = f"{type(exc).__name__}: {exc}"
                 event.error = error
+                if isinstance(exc, Truncated) and max_predict is not None:
+                    # 같은 한도를 반복하지 않고 기존 재시도·호출 예산 안에서만 확장한다.
+                    expanded = min(num_predict * 2, output_limit)
+                    if expanded <= num_predict:
+                        break
+                    num_predict = expanded
             finally:
                 event.seconds = time.monotonic() - started
                 self.events.append(event)

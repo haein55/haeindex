@@ -7,14 +7,19 @@ import os
 import re
 import unicodedata
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from typing import Any
 
 import boto3
 from pydantic import BaseModel
 
+from haeindex.profiling import span
+
 DEFAULT_REGION = "us-east-1"
 DEFAULT_HEAVY_MODEL = "us.anthropic.claude-opus-4-5-20251101-v1:0"
 DEFAULT_MEDIUM_MODEL = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+DEFAULT_TEXT_MODEL = "us.openai.gpt-5.6-sol"
 DEFAULT_LIGHT_MODEL = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
 DEFAULT_EMBED_MODEL = "amazon.titan-embed-text-v2:0"
 EMBED_DIM = 1024
@@ -31,6 +36,9 @@ def normalize(text: str) -> str:
 class ChatResult(BaseModel):
     content: str
     done_reason: str | None = None
+    input_tokens: int = 0
+    output_tokens: int = 0
+    server_latency_ms: int = 0
 
 
 class Truncated(RuntimeError):
@@ -45,8 +53,11 @@ def bedrock_model(role: str, override: str | None = None) -> str:
     if override:
         return override
     defaults = {
-        "answer": ("LLM_HEAVY_MODEL_ID", DEFAULT_HEAVY_MODEL),
-        "analysis": ("LLM_MEDIUM_MODEL_ID", DEFAULT_MEDIUM_MODEL),
+        # 2026-09-21 동일 10문항의 원문 대조: Sol 9, Terra 8, Sonnet/Astra 7.
+        # 추가 역할 비교: 비전 Sonnet, 카드 보강 Haiku, 하이브리드 임베딩 Titan 유지.
+        # 청크 문맥 보강은 검색 이득이 확인되지 않아 CLI에서 명시적으로 실행한다.
+        "answer": ("LLM_MEDIUM_MODEL_ID", DEFAULT_TEXT_MODEL),
+        "analysis": ("LLM_MEDIUM_MODEL_ID", DEFAULT_TEXT_MODEL),
         "vision": ("LLM_MEDIUM_MODEL_ID", DEFAULT_MEDIUM_MODEL),
         "enrich": ("LLM_LIGHT_MODEL_ID", DEFAULT_LIGHT_MODEL),
     }
@@ -121,16 +132,24 @@ class Bedrock:
                 vectors.append([0.0] * self.embed_dim)
                 continue
             try:
-                response = self._runtime.invoke_model(
-                    modelId=self.embed_model,
-                    contentType="application/json",
-                    accept="application/json",
-                    body=json.dumps(
-                        {"inputText": text, "dimensions": self.embed_dim, "normalize": True}
-                    ),
-                )
-                data = json.loads(response["body"].read())
-                vector = data["embedding"]
+                with span(
+                    "bedrock.embed",
+                    "Titan 임베딩",
+                    model=self.embed_model,
+                    input_chars=len(text),
+                ) as metrics:
+                    response = self._runtime.invoke_model(
+                        modelId=self.embed_model,
+                        contentType="application/json",
+                        accept="application/json",
+                        body=json.dumps(
+                            {"inputText": text, "dimensions": self.embed_dim, "normalize": True}
+                        ),
+                    )
+                    data = json.loads(response["body"].read())
+                    vector = data["embedding"]
+                    metrics["input_tokens"] = int(data.get("inputTextTokenCount", 0))
+                    metrics["dimensions"] = len(vector)
             except Exception as exc:  # boto3 exposes service-specific generated exceptions.
                 raise BedrockError(f"Bedrock 임베딩 실패: {exc}") from exc
             if len(vector) != self.embed_dim:
@@ -142,8 +161,19 @@ class Bedrock:
         return vectors
 
     def embed_batched(self, texts: Sequence[str], batch: int = 16) -> list[list[float]]:
-        # Titan text embeddings accept one input per request.
-        return self.embed(texts)
+        # Titan은 요청당 입력 하나만 받는다. 제한된 동시 요청으로 출력 순서를 보존한다.
+        values = list(texts)
+        if len(values) < 2:
+            return self.embed(values)
+        workers = min(8, batch, len(values))
+        jobs = [(copy_context(), text) for text in values]
+
+        def run(job) -> list[float]:
+            context, text = job
+            return context.run(self.embed, [text])[0]
+
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="titan-embed") as pool:
+            return list(pool.map(run, jobs))
 
     def chat(
         self,
@@ -156,9 +186,12 @@ class Bedrock:
     ) -> ChatResult:
         del seed  # Converse has no portable seed option.
         system, converted = [], []
+        input_chars = 0
+        image_count = 0
         for message in messages:
             role = message.get("role")
             content = str(message.get("content", ""))
+            input_chars += len(content)
             if role == "system":
                 system.append({"text": content})
                 continue
@@ -168,22 +201,36 @@ class Bedrock:
                     blocks.append(
                         {"image": {"format": "png", "source": {"bytes": base64.b64decode(encoded)}}}
                     )
+                    image_count += 1
                 except (ValueError, TypeError) as exc:
                     raise BedrockError("Bedrock 이미지 입력이 올바른 base64가 아닙니다") from exc
             converted.append(
                 {"role": "assistant" if role == "assistant" else "user", "content": blocks}
             )
         if response_schema:
-            system.append(
-                {"text": "반환할 JSON Schema:\n" + json.dumps(response_schema, ensure_ascii=False)}
-            )
+            schema_text = "반환할 JSON Schema:\n" + json.dumps(response_schema, ensure_ascii=False)
+            system.append({"text": schema_text})
+            input_chars += len(schema_text)
         try:
-            response = self._runtime.converse(
-                modelId=self.chat_model,
-                system=system,
-                messages=converted,
-                inferenceConfig={"temperature": temperature, "maxTokens": num_predict},
-            )
+            with span(
+                "bedrock.chat",
+                "Bedrock Converse",
+                model=self.chat_model,
+                input_chars=input_chars,
+                images=image_count,
+                max_tokens=num_predict,
+            ) as metrics:
+                response = self._runtime.converse(
+                    modelId=self.chat_model,
+                    system=system,
+                    messages=converted,
+                    inferenceConfig={"temperature": temperature, "maxTokens": num_predict},
+                )
+                usage = response.get("usage", {})
+                service = response.get("metrics", {})
+                metrics["input_tokens"] = int(usage.get("inputTokens", 0))
+                metrics["output_tokens"] = int(usage.get("outputTokens", 0))
+                metrics["server_latency_ms"] = int(service.get("latencyMs", 0))
         except Exception as exc:
             raise BedrockError(f"Bedrock Converse 실패: {exc}") from exc
         stop = response.get("stopReason")
@@ -191,4 +238,12 @@ class Bedrock:
             raise Truncated(f"Bedrock 응답이 maxTokens={num_predict}에서 잘렸습니다")
         content = response.get("output", {}).get("message", {}).get("content", [])
         text = "".join(block.get("text", "") for block in content)
-        return ChatResult(content=text, done_reason=stop)
+        usage = response.get("usage", {})
+        service = response.get("metrics", {})
+        return ChatResult(
+            content=text,
+            done_reason=stop,
+            input_tokens=int(usage.get("inputTokens", 0)),
+            output_tokens=int(usage.get("outputTokens", 0)),
+            server_latency_ms=int(service.get("latencyMs", 0)),
+        )

@@ -16,7 +16,9 @@ import pdfplumber
 from haeindex.answer import MESSAGES
 from haeindex.augmentation import enhance_document
 from haeindex.bedrock import bedrock_embedding_model, bedrock_model
-from haeindex.index import INDEX, client, doc_counts, ensure_index, index_chunks
+from haeindex.index import client, doc_counts, doc_stats, ensure_index, index_chunks, replace_doc
+from haeindex.index_manifest import load as load_index_manifest
+from haeindex.index_manifest import save as save_index_manifest
 from haeindex.load_pdf import page_count
 from haeindex.models import model_client
 from haeindex.paths import slugify
@@ -35,6 +37,7 @@ ASSETS = {
     "/cat-cheese.svg": ("cat-cheese.svg", "image/svg+xml"),
     "/cat-tabby.svg": ("cat-tabby.svg", "image/svg+xml"),
     "/cat-munchkin.svg": ("cat-munchkin.svg", "image/svg+xml"),
+    "/searchdog.svg": ("searchdog.svg", "image/svg+xml"),
 }
 
 
@@ -61,28 +64,61 @@ class Application:
         self.active: str | None = None
 
     def documents(self) -> dict:
+        stats: dict[str, dict[str, int]] = {}
+        search_available = False
         os_client = client()
         try:
-            counts = doc_counts(os_client)
+            stats = doc_stats(os_client)
+            search_available = True
+        except Exception:
+            # 원본 PDF는 검색 서버가 꺼졌거나 색인이 실패해도 목록에서 숨기지 않는다.
+            pass
         finally:
             os_client.close()
+        pdfs = {}
+        if self.inbox.exists():
+            for path in sorted(self.inbox.glob("*.pdf"), key=lambda item: item.name.casefold()):
+                pdfs.setdefault(slugify(path), path)
         docs = []
-        for doc_id, count in sorted(counts.items()):
-            path = pdf_for(doc_id, self.inbox)
+        for doc_id in sorted(set(stats) | set(pdfs)):
+            path = pdfs.get(doc_id)
             try:
                 pages = Profile.load(doc_id).n_pages
             except (FileNotFoundError, ValueError):
-                pages = None
+                try:
+                    pages = page_count(path) if path else None
+                except Exception:
+                    pages = None
+            row = stats.get(doc_id, {"chunks": 0, "last_page": 0})
+            indexed = row["chunks"] > 0 if search_available else None
+            manifest = load_index_manifest(doc_id)
+            complete = bool(
+                indexed
+                and (
+                    (
+                        manifest is not None
+                        and manifest.get("pages") == pages
+                        and manifest.get("chunks") == row["chunks"]
+                    )
+                    or (
+                        manifest is None
+                        and (pages is None or row["last_page"] >= pages)
+                    )
+                )
+            )
             docs.append(
                 {
                     "id": doc_id,
                     "name": path.name if path else doc_id,
-                    "chunks": count,
+                    "chunks": row["chunks"],
                     "pages": pages,
                     "has_pdf": path is not None,
+                    "indexed": indexed,
+                    "index_complete": complete if indexed is not None else None,
+                    "indexed_through_page": row["last_page"],
                 }
             )
-        return {"documents": docs}
+        return {"documents": docs, "search_available": search_available}
 
     def health(self) -> dict:
         answer_model = bedrock_model("answer")
@@ -222,6 +258,45 @@ class Application:
             "reports": reports,
         }
 
+    def _index_pdf(self, path: Path, *, progress) -> dict:
+        """PDF 전체를 준비한 뒤 기존 색인을 교체한다. 실패 시 부분 색인은 제거한다."""
+
+        doc_id = slugify(path)
+        progress("profiling", f"{path.name}: 문서 구조를 분석합니다")
+        prof = build(path)
+        prof.save()
+        from haeindex.cli import _chunks_for
+
+        _, chunks, _ = _chunks_for(path, prof, 1200)
+        if not chunks:
+            raise ValueError("추출할 텍스트가 없습니다. OCR 처리된 PDF를 사용해 주세요.")
+        with ExitStack() as stack:
+            os_client = client()
+            stack.callback(os_client.close)
+            progress("embedding", f"{path.name}: 원문 청크 {len(chunks)}개를 임베딩합니다")
+            ol = stack.enter_context(model_client("enrich", num_ctx=16384))
+            vectors = ol.embed_batched([c.text for c in chunks])
+            ensure_index(os_client)
+            progress("indexing", f"{path.name}: 청크 {len(chunks)}개를 색인합니다")
+            replace_doc(os_client, doc_id)
+            try:
+                ok, errors = index_chunks(os_client, chunks, vectors)
+            except Exception:
+                replace_doc(os_client, doc_id)
+                raise
+            if errors:
+                replace_doc(os_client, doc_id)
+                raise RuntimeError(
+                    f"청크 {ok}개 저장, {len(errors)}개 실패. 부분 색인을 제거했습니다."
+                )
+            save_index_manifest(doc_id, pages=prof.n_pages, chunks=ok)
+        return {
+            "doc_id": doc_id,
+            "chunks": len(chunks),
+            "pages": prof.n_pages,
+            "report": {"deferred": True, "failures": []},
+        }
+
     def upload(self, filename: str, data: bytes, *, progress) -> dict:
         # 기존 PDF/색인을 덮어쓰지 않는다. slug 충돌도 별도로 검사한다.
         if Path(filename).name != filename or "\\" in filename or "\x00" in filename:
@@ -229,45 +304,52 @@ class Application:
         if not filename.lower().endswith(".pdf") or not data.startswith(b"%PDF-"):
             raise ValueError("PDF 파일만 추가할 수 있습니다.")
         doc_id = slugify(Path(filename))
-        progress("reading", "PDF를 확인하고 있습니다")
+        progress("reading", f"{filename}: PDF를 확인합니다")
         with pdfplumber.open(io.BytesIO(data)) as pdf:
             if not pdf.pages:
                 raise ValueError("비어 있는 PDF입니다.")
         self.inbox.mkdir(parents=True, exist_ok=True)
         destination = self.inbox / f"{Path(filename).stem}.pdf"
-        with ExitStack() as stack:
-            os_client = client()
-            stack.callback(os_client.close)
-            if (
-                destination.exists()
-                or pdf_for(doc_id, self.inbox)
-                or doc_id in doc_counts(os_client)
-            ):
-                raise ValueError("같은 이름의 문서가 있습니다. 파일명을 변경해 추가해 주세요.")
-            with destination.open("xb") as handle:
-                handle.write(data)
-            progress("profiling", "문서 구조와 읽는 순서를 분석합니다")
-            prof = build(destination, head=page_count(destination))
-            prof.save()
-            from haeindex.cli import _chunks_for
+        os_client = client()
+        try:
+            indexed = doc_id in doc_counts(os_client)
+        finally:
+            os_client.close()
+        if destination.exists() or pdf_for(doc_id, self.inbox) or indexed:
+            raise ValueError("같은 이름의 문서가 있습니다. 미색인 문서는 목록에서 재색인해 주세요.")
+        with destination.open("xb") as handle:
+            handle.write(data)
+        result = self._index_pdf(destination, progress=progress)
+        result["message"] = (
+            f"{filename} 전체 {result['pages']}쪽, 청크 {result['chunks']}개를 색인했습니다."
+        )
+        return result
 
-            _, chunks, _ = _chunks_for(destination, prof, 1200)
-            if not chunks:
-                raise ValueError("추출할 텍스트가 없습니다. OCR 처리된 PDF를 사용해 주세요.")
-            progress("embedding", f"원문 청크 {len(chunks)}개를 검색에 연결합니다")
-            ol = stack.enter_context(model_client("enrich", num_ctx=16384))
-            vectors = ol.embed_batched([c.text for c in chunks])
-            ensure_index(os_client)
-            ok, errors = index_chunks(os_client, chunks, vectors)
-            os_client.indices.refresh(index=INDEX)
-            if errors:
-                raise RuntimeError(
-                    f"청크 {ok}개 저장, {len(errors)}개 실패. CLI로 재색인해 주세요."
-                )
-            report = enhance_document(
-                os_client, ol, ol, doc_id, progress=lambda detail: progress("enhancing", detail)
-            )
-        return {"message": f"{filename} 문서를 추가했습니다.", "doc_id": doc_id, "report": report}
+    def reindex(self, documents: list[str], *, progress) -> dict:
+        if not documents:
+            raise ValueError("재색인할 문서를 선택해 주세요.")
+        paths = []
+        for doc_id in documents:
+            path = pdf_for(doc_id, self.inbox)
+            if path is None:
+                raise ValueError(f"원본 PDF를 찾을 수 없습니다: {doc_id}")
+            paths.append(path)
+        results, failures = [], []
+        for path in paths:
+            try:
+                results.append(self._index_pdf(path, progress=progress))
+            except Exception as exc:
+                failures.append({"document": path.name, "error": f"{type(exc).__name__}: {exc}"})
+                progress("index_error", f"{path.name}: 색인 실패, 다음 문서를 계속합니다")
+        if not results:
+            details = "; ".join(item["error"] for item in failures)
+            raise RuntimeError(f"재색인에 성공한 문서가 없습니다. {details}")
+        return {
+            "message": f"재색인 성공 {len(results)}개 · 실패 {len(failures)}개",
+            "documents": results,
+            "failures": failures,
+            "doc_id": results[0]["doc_id"] if len(results) == 1 else "",
+        }
 
 
 class WebServer(ThreadingHTTPServer):
@@ -361,7 +443,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("PDF 파일만 추가할 수 있습니다.")
                 filename = unquote(self.headers.get("X-Filename", ""))
                 job_id = app.submit(app.upload, filename, self.rfile.read(length))
-            elif self.path in {"/api/ask", "/api/enhance"}:
+            elif self.path in {"/api/ask", "/api/enhance", "/api/reindex"}:
                 if content_type != "application/json":
                     raise ValueError("JSON 요청이 필요합니다.")
                 body = json.loads(self.rfile.read(length))
@@ -370,7 +452,7 @@ class Handler(BaseHTTPRequestHandler):
                 docs = body.get("documents", [])
                 if (
                     not isinstance(docs, list)
-                    or len(docs) > 20
+                    or len(docs) > 200
                     or any(not isinstance(d, str) or len(d) > 100 for d in docs)
                 ):
                     raise ValueError("문서 선택을 확인해 주세요.")
@@ -379,8 +461,10 @@ class Handler(BaseHTTPRequestHandler):
                     if not isinstance(question, str) or not 1 <= len(question.strip()) <= 2000:
                         raise ValueError("질문은 1~2,000자로 입력해 주세요.")
                     job_id = app.submit(app.ask, question.strip(), docs)
-                else:
+                elif self.path == "/api/enhance":
                     job_id = app.submit(app.enhance, docs)
+                else:
+                    job_id = app.submit(app.reindex, docs)
             else:
                 self._json(404, {"error": "경로를 찾을 수 없습니다."})
                 return

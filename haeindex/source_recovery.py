@@ -12,6 +12,7 @@ from haeindex.bedrock import Bedrock
 from haeindex.index import INDEX, SOURCE_EXCLUDE
 from haeindex.llm_tasks import TaskFailure, TaskRunner
 from haeindex.paths import slugify
+from haeindex.profiling import span
 from haeindex.reasoning import Record
 from haeindex.search import Hit, LegHit
 
@@ -28,14 +29,16 @@ def fetch_chunks(
     filters = [{"terms": {"chunk_id": list(ids)}}]
     if doc_ids:
         filters.append({"terms": {"doc_id": list(doc_ids)}})
-    rows = os_client.search(
-        index=index,
-        body={
-            "size": min(len(ids), 60),
-            "_source": {"excludes": SOURCE_EXCLUDE},
-            "query": {"bool": {"filter": filters}},
-        },
-    )["hits"]["hits"]
+    with span("opensearch", "절 원문 가져오기", index=index) as metrics:
+        rows = os_client.search(
+            index=index,
+            body={
+                "size": min(len(ids), 60),
+                "_source": {"excludes": SOURCE_EXCLUDE},
+                "query": {"bool": {"filter": filters}},
+            },
+        )["hits"]["hits"]
+        metrics["hits"] = len(rows)
     return [
         Hit(
             chunk_id=h["_source"]["chunk_id"],
@@ -64,14 +67,16 @@ def neighbors(os_client, hits: Sequence[Hit], index: str = INDEX) -> list[Hit]:
             )
     if not clauses:
         return []
-    rows = os_client.search(
-        index=index,
-        body={
-            "size": 16,
-            "_source": {"excludes": SOURCE_EXCLUDE},
-            "query": {"bool": {"should": clauses, "minimum_should_match": 1}},
-        },
-    )["hits"]["hits"]
+    with span("opensearch", "인접 원문 가져오기", index=index) as metrics:
+        rows = os_client.search(
+            index=index,
+            body={
+                "size": 16,
+                "_source": {"excludes": SOURCE_EXCLUDE},
+                "query": {"bool": {"should": clauses, "minimum_should_match": 1}},
+            },
+        )["hits"]["hits"]
+        metrics["hits"] = len(rows)
     return [
         Hit(
             chunk_id=h["_source"]["chunk_id"],
@@ -116,23 +121,26 @@ def recover_pages(
         if path is None or number < 1:
             continue
         with pdfplumber.open(path) as pdf:
-            if number > len(pdf.pages):
-                continue
-            page = pdf.pages[number - 1].dedupe_chars()
-            text = page.extract_text(layout=False) or ""
-            tables = page.extract_tables()
-            if tables:
-                text += "\n\nPDF 표의 행(열 구분: |)\n" + "\n\n".join(
-                    "\n".join(
-                        " | ".join((c or "").replace("\n", " ") for c in row) for row in table
+            with span("pdf", "PDF 텍스트·표 추출", document=doc_id, page=number):
+                if number > len(pdf.pages):
+                    continue
+                page = pdf.pages[number - 1].dedupe_chars()
+                text = page.extract_text(layout=False) or ""
+                tables = page.extract_tables()
+                if tables:
+                    text += "\n\nPDF 표의 행(열 구분: |)\n" + "\n\n".join(
+                        "\n".join(
+                            " | ".join((c or "").replace("\n", " ") for c in row)
+                            for row in table
+                        )
+                        for table in tables
                     )
-                    for table in tables
-                )
             origin = "pdf_text"
             image_hash = ""
             if use_vision and runner is not None and vision is not None:
                 buf = io.BytesIO()
-                page.to_image(resolution=160).original.save(buf, format="PNG")
+                with span("pdf", "PDF 페이지 이미지 변환", document=doc_id, page=number):
+                    page.to_image(resolution=160).original.save(buf, format="PNG")
                 png = buf.getvalue()
                 image_hash = hashlib.sha256(png).hexdigest()
                 images = [base64.b64encode(png).decode()]
@@ -167,36 +175,36 @@ def recover_pages(
                             origin = "vision_transcription"
                 except TaskFailure:
                     pass
-            if not text.strip():
-                continue
-            # 긴 페이지는 원문 순서를 유지한 조각으로 나누되 행 중간을 자르지 않는다.
-            pieces, lines, count = [], [], 0
-            for line in text.splitlines():
-                if lines and count + len(line) > 4800:
-                    pieces.append("\n".join(lines))
-                    lines, count = [], 0
-                lines.append(line)
-                count += len(line) + 1
-            if lines:
+        if not text.strip():
+            continue
+        # 긴 페이지는 원문 순서를 유지한 조각으로 나누되 행 중간을 자르지 않는다.
+        pieces, lines, count = [], [], 0
+        for line in text.splitlines():
+            if lines and count + len(line) > 4800:
                 pieces.append("\n".join(lines))
-            for i, body in enumerate(pieces):
-                cid = f"{doc_id}#pdf{number:04d}-{i}-{origin}"
-                recovered.append(
-                    Hit(
-                        chunk_id=cid,
-                        fused=0,
-                        source={
-                            "chunk_id": cid,
-                            "doc_id": doc_id,
-                            "page": number,
-                            "end_page": number,
-                            "title": f"원본 PDF p.{number}",
-                            "path": "",
-                            "body": body,
-                            "text": body,
-                            "evidence_origin": origin,
-                            "image_sha256": image_hash,
-                        },
-                    )
+                lines, count = [], 0
+            lines.append(line)
+            count += len(line) + 1
+        if lines:
+            pieces.append("\n".join(lines))
+        for i, body in enumerate(pieces):
+            cid = f"{doc_id}#pdf{number:04d}-{i}-{origin}"
+            recovered.append(
+                Hit(
+                    chunk_id=cid,
+                    fused=0,
+                    source={
+                        "chunk_id": cid,
+                        "doc_id": doc_id,
+                        "page": number,
+                        "end_page": number,
+                        "title": f"원본 PDF p.{number}",
+                        "path": "",
+                        "body": body,
+                        "text": body,
+                        "evidence_origin": origin,
+                        "image_sha256": image_hash,
+                    },
                 )
+            )
     return recovered

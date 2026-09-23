@@ -1,3 +1,6 @@
+from pathlib import Path
+from types import SimpleNamespace
+
 from haeindex.blocks import Block
 from haeindex.chunks import (
     build_sections,
@@ -7,6 +10,23 @@ from haeindex.chunks import (
     token_len_ko,
 )
 from haeindex.headings import Heading
+
+
+def test_index_chunking_reads_every_page_not_only_profile_sample(monkeypatch):
+    from haeindex import cli
+
+    loaded = []
+    monkeypatch.setattr(cli, "load_pages", lambda pdf, pages: loaded.extend(pages) or [])
+    profile = SimpleNamespace(
+        doc_id="long-document",
+        n_pages=250,
+        head_pages=120,
+        space_ratio=0.7,
+        heading_method="none",
+        undouble=False,
+    )
+    cli._chunks_for(Path("long.pdf"), profile, 1200)
+    assert loaded == list(range(1, 251))
 
 
 def blk(text: str, page: int, order: int, size: float = 10.0) -> Block:

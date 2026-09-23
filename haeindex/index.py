@@ -192,10 +192,28 @@ def find_covering(
 
 
 def doc_counts(os_client: OpenSearch, name: str = INDEX) -> dict[str, int]:
+    return {doc_id: row["chunks"] for doc_id, row in doc_stats(os_client, name).items()}
+
+
+def doc_stats(os_client: OpenSearch, name: str = INDEX) -> dict[str, dict[str, int]]:
     if not os_client.indices.exists(index=name):
         return {}
     agg = os_client.search(
         index=name,
-        body={"size": 0, "aggs": {"d": {"terms": {"field": "doc_id", "size": 200}}}},
+        body={
+            "size": 0,
+            "aggs": {
+                "d": {
+                    "terms": {"field": "doc_id", "size": 200},
+                    "aggs": {"last_page": {"max": {"field": "end_page"}}},
+                }
+            },
+        },
     )
-    return {b["key"]: b["doc_count"] for b in agg["aggregations"]["d"]["buckets"]}
+    return {
+        bucket["key"]: {
+            "chunks": int(bucket["doc_count"]),
+            "last_page": int(bucket.get("last_page", {}).get("value") or 0),
+        }
+        for bucket in agg["aggregations"]["d"]["buckets"]
+    }
