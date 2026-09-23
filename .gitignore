@@ -7,6 +7,10 @@ work/
 .DS_Store
 data/
 docs/
+screenshots/
+diagrams/
+goldset/
+README*
 
 # Local credentials and private configuration
 .env
